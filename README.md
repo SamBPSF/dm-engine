@@ -24,7 +24,7 @@ narrating chat cannot fudge any of them.
 
 Add a custom connector with the URL `https://<domain>/mcp` and a request header:
 
-    Authorization: Bearer <your DM_KEY>
+    x-api-key: <your DM_KEY>
 
 ## Run locally
 

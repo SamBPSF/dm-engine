@@ -1,7 +1,7 @@
 """DM engine server. Exposes engine.py to Claude as tools over HTTP.
 
 Environment variables:
-  DM_KEY    required secret. Requests must send it as "Authorization: Bearer <key>".
+  DM_KEY    required secret. Requests must send it in an x-api-key header (or "Authorization: Bearer <key>").
   DATA_DIR  where the game database lives (mount a Railway volume here, e.g. /data).
   PORT      set by the host.
 """
@@ -203,7 +203,12 @@ class KeyGate:
         if scope["path"] in ("/", "/health"):
             return await PlainTextResponse("dm-engine ok")(scope, receive, send)
         headers = {k.decode().lower(): v.decode() for k, v in scope.get("headers", [])}
-        sent = headers.get("authorization", "").removeprefix("Bearer ").strip() or headers.get("x-dm-key", "")
+        sent = (
+            headers.get("x-api-key")
+            or headers.get("api-key")
+            or headers.get("x-auth-token")
+            or headers.get("authorization", "").removeprefix("Bearer ").strip()
+        ).strip()
         if not DM_KEY or not hmac.compare_digest(sent, DM_KEY):
             return await JSONResponse({"error": "unauthorized"}, status_code=401)(scope, receive, send)
         return await self.inner(scope, receive, send)
