@@ -31,6 +31,7 @@ def _doc(name: str) -> str:
 
 PLAYBOOK = _doc("playbook.md")
 AUTHOR = _doc("author.md")
+REVIEWER = _doc("reviewer.md")
 
 
 # ---------------------------------------------------------------- storage
@@ -677,6 +678,7 @@ def session_start(campaign: str) -> dict:
     m = _meta(campaign)
     m["session"] += 1
     m["session_damage"] = 0
+    m["session_started"] = time.time()
     _put(campaign, "meta", "meta", m)
     ents = _all(campaign, "entity")
     quiet = m["session"] - 1 - m["last_danger_session"]
@@ -706,16 +708,75 @@ def session_start(campaign: str) -> dict:
         "prepared": ("A session guide is sealed under 'next-session'. Open it before the first scene."
                      if _get(campaign, "sealed", "next-session") else
                      "No session guide is prepared. Run from the sealed entries, or improvise within the playbook."),
+        "narrator_notes": ("Corrections from the last review are sealed under 'narrator-notes'. Open and "
+                           "follow them before the first scene."
+                           if _get(campaign, "sealed", "narrator-notes") else "None yet."),
+        "player_feedback": [f["text"] for f in _get(campaign, "feedback", "all", [])][-10:],
+        "review_status": ("The previous session was never reviewed, so consequences may be thin. Suggest "
+                          "running the Reviewer after this session."
+                          if m["session"] > 1 and m.get("last_reviewed", 0) < m["session"] - 1 else "Up to date."),
         "reminder": "Clocks and sealed entries are hidden from the player. Never show them.",
     }
 
 
-def session_end(campaign: str, summary: str, open_threads: list[str]) -> dict:
+def session_end(campaign: str, summary: str, open_threads: list[str], record: str = "") -> dict:
     m = _meta(campaign)
     m["last_summary"], m["open_threads"] = summary, open_threads
     _put(campaign, "meta", "meta", m)
+    _put(campaign, "record", str(m["session"]), {
+        "session": m["session"], "summary": summary, "open_threads": open_threads,
+        "record": record, "pc_damage_taken": m["session_damage"]})
     _log(campaign, "session", f"Session {m['session']} ended. PC damage taken: {m['session_damage']}. {summary}")
-    return {"session": m["session"], "pc_damage_taken": m["session_damage"], "saved": True}
+    return {"session": m["session"], "pc_damage_taken": m["session_damage"], "saved": True,
+            "next": ("Ask the player whether to run the Reviewer now. If yes, call reviewer_brief in this "
+                     "chat and follow its procedure without revealing anything.")}
+
+
+def add_feedback(campaign: str, text: str) -> dict:
+    """The player's own words about how the game is going. Kept, and shown to the Narrator and Reviewer."""
+    m = _meta(campaign)
+    f = _get(campaign, "feedback", "all", [])
+    f.append({"session": m["session"], "text": text.strip()})
+    _put(campaign, "feedback", "all", f[-30:])
+    return {"saved": True, "feedback_on_file": len(f[-30:])}
+
+
+def reviewer_brief(campaign: str) -> dict:
+    """Everything the Reviewer needs to judge the last session and prepare the next."""
+    m = _meta(campaign)
+    since = m.get("session_started", 0)
+    with _db() as con:
+        rows = con.execute("SELECT kind, text FROM log WHERE campaign=? AND ts>=? ORDER BY ts",
+                           (campaign, since)).fetchall()
+    records = sorted(_all(campaign, "record").values(), key=lambda r: -r["session"])[:3]
+    ents = _all(campaign, "entity")
+    return {
+        "procedure": REVIEWER,
+        "session": m["session"],
+        "already_reviewed": m.get("last_reviewed", 0) >= m["session"],
+        "session_records": records,
+        "engine_log_this_session": [f"[{k}] {t}" for k, t in rows][-200:],
+        "pc_damage_taken_this_session": m["session_damage"],
+        "sessions_since_pc_below_half": m["session"] - m["last_danger_session"],
+        "party": [e for e in ents.values() if e["kind"] in ("pc", "ally")],
+        "setting_notes": _get(campaign, "setting", "notes") or "None saved.",
+        "clocks": list(_all(campaign, "clock").values()),
+        "cast": list(_all(campaign, "card").values()),
+        "sealed_keys": sealed_index(campaign)["entries"],
+        "player_feedback": _get(campaign, "feedback", "all", []),
+        "world_hours": round(m["world_hours"], 1),
+        "secrecy": "Nothing you read or write here may appear in your visible replies.",
+    }
+
+
+def finish_review(campaign: str) -> dict:
+    m = _meta(campaign)
+    m["last_reviewed"] = m["session"]
+    _put(campaign, "meta", "meta", m)
+    _log(campaign, "review", f"Session {m['session']} reviewed.")
+    missing = [k for k in ("next-session", "narrator-notes") if not _get(campaign, "sealed", k)]
+    return {"reviewed_session": m["session"],
+            "warning": f"Not yet written: {', '.join(missing)}." if missing else "Next session is prepared."}
 
 
 def recent_log(campaign: str, limit: int = 40) -> dict:

@@ -36,6 +36,10 @@ INSTRUCTIONS = """You are the Narrator for a solo D&D 5e game. This engine is th
   the engine, never from memory.
 - If the player asks you to "run the Author" or prepare a campaign, call author_brief and follow its
   procedure. That work is sealed: your visible replies must reveal none of it.
+- When the player says how the game feels or what they want changed, save it with add_feedback.
+- End every session with session_end, including a detailed private record. Then offer to run the Reviewer.
+  If the player asks to "run the Reviewer", call reviewer_brief and follow its procedure. That work is
+  sealed too.
 - Clocks and sealed entries are secret. Never reveal, quote or hint that they exist.
 - If a tool returns an error, fix the call. Do not improvise the outcome instead."""
 
@@ -56,9 +60,31 @@ def session_start(campaign: str) -> dict:
 
 
 @mcp.tool()
-def session_end(campaign: str, summary: str, open_threads: list[str]) -> dict:
-    """End a session. Save a short factual summary and the unresolved threads for next time."""
-    return _run(engine.session_end, campaign, summary, open_threads)
+def session_end(campaign: str, summary: str, open_threads: list[str], record: str = "") -> dict:
+    """End a session. summary: two or three factual lines for next session's recap. open_threads: what is
+    unresolved. record: a private, detailed account for the Reviewer, scene by scene: what the player
+    chose, who they dealt with and how it went, what was revealed, where it dragged, what they enjoyed."""
+    return _run(engine.session_end, campaign, summary, open_threads, record)
+
+
+@mcp.tool()
+def add_feedback(campaign: str, text: str) -> dict:
+    """Save the player's own comment about how the game is going, in their words. Use whenever they say
+    what they liked, disliked or want changed. It is shown to the Narrator and the Reviewer from then on."""
+    return _run(engine.add_feedback, campaign, text)
+
+
+@mcp.tool()
+def reviewer_brief(campaign: str) -> dict:
+    """REVIEWER ONLY. Start here when asked to run the Reviewer or review a session. Returns the
+    procedure and everything about the last session. Never repeat any of it in a visible reply."""
+    return _run(engine.reviewer_brief, campaign)
+
+
+@mcp.tool()
+def finish_review(campaign: str) -> dict:
+    """REVIEWER ONLY. Mark the last session as reviewed once the next session is prepared."""
+    return _run(engine.finish_review, campaign)
 
 
 @mcp.tool()

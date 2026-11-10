@@ -157,4 +157,27 @@ assert "No session guide" in g.session_start(C4)["prepared"]
 g.seal(C4, "next-session", "Open on the bridge.", ["session-1"])
 assert "next-session" in g.session_start(C4)["prepared"]
 
+# the Reviewer: session records, player feedback, the log since the session began, and review status
+C5 = "review"
+g.upsert_entity(C5, "Vilik", "pc", {"max_hp": 40, "ac": 15})
+g.session_start(C5)
+g.apply_damage(C5, "Vilik", 7, "slashing", "a knife")
+g.add_feedback(C5, "The harbour scene dragged.")
+e = g.session_end(C5, "Vilik reached the harbour.", ["Who sent the knife?"], "Scene 1: ... Scene 2: ...")
+assert "Reviewer" in e["next"]
+rb = g.reviewer_brief(C5)
+assert "Reviewer's procedure" in rb["procedure"] and not rb["already_reviewed"]
+assert rb["session_records"][0]["record"].startswith("Scene 1") and rb["pc_damage_taken_this_session"] == 7
+assert any("knife" in line for line in rb["engine_log_this_session"])
+assert rb["player_feedback"][0]["text"] == "The harbour scene dragged."
+assert "Not yet written" in g.finish_review(C5)["warning"]
+g.seal(C5, "next-session", "Open at the customs house.")
+g.seal(C5, "narrator-notes", "Make the harbourmaster bargain.")
+assert g.finish_review(C5)["warning"] == "Next session is prepared."
+s2 = g.session_start(C5)
+assert s2["review_status"] == "Up to date." and "narrator-notes" in s2["narrator_notes"]
+assert s2["player_feedback"] == ["The harbour scene dragged."]
+g.session_end(C5, "More happened.", [])
+assert "never reviewed" in g.session_start(C5)["review_status"]
+
 print("all engine checks passed")
