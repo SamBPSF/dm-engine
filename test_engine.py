@@ -96,4 +96,24 @@ for _ in range(3):
     g.session_end(C2, "Nothing happened.", [])
 assert "must" in g.session_start(C2)["danger_directive"]
 
+# battle map: positions are stored, moves measured, and the grid comes back on the player's turn
+C3 = "map"
+g.upsert_entity(C3, "Vilik", "pc", {"max_hp": 40, "ac": 15})
+g.upsert_entity(C3, "Wolf", "creature", {"max_hp": 11, "ac": 13,
+                "attacks": [{"name": "Bite", "to_hit": 4, "damage": "2d4+2"}]})
+m = g.set_battle_map(C3, 12, 10, [{"name": "Boulder", "kind": "cover", "x": 7, "y": 4, "w": 2, "h": 1}],
+                     {"Vilik": [5, 7], "Wolf": [2, 6]})
+assert len(m["map"]["tokens"]) == 2
+assert g.move_token(C3, "Wolf", 4, 7)["distance_feet"] == 10
+try:
+    g.move_token(C3, "Wolf", 40, 7)
+    raise AssertionError("moved off the grid")
+except g.GameError:
+    pass
+g.start_combat(C3, ["Vilik", "Wolf"], {"Vilik": 25})
+t = g.next_turn(C3)
+assert t["now_acting"]["name"] == "Wolf" and "map" not in t
+t = g.next_turn(C3)
+assert t["now_acting"]["name"] == "Vilik" and t["map"]["tokens"] and "draw_grid" in t
+
 print("all engine checks passed")

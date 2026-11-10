@@ -25,6 +25,11 @@ INSTRUCTIONS = """You are the Narrator for a solo D&D 5e game. This engine is th
 - Everything else is rolled here: creature_attack, saving_throw, roll. Report results exactly as returned.
 - Never track hit points, slots or initiative yourself. The engine's numbers are the truth.
 - Time passing lets villains act. Call advance_time or rest whenever hours pass, and show the consequences.
+- In every fight, call set_battle_map when combat starts and move_token whenever anyone moves.
+- At the start of each of the player's turns, draw a simple battle grid from the engine's map: 5 ft squares,
+  labelled shapes for cover, hazards and exits, a lettered token for each combatant, the player's token
+  distinct. Use an inline visual if the app can show one, otherwise a plain text grid. Positions come from
+  the engine, never from memory.
 - Clocks and sealed entries are secret. Never reveal, quote or hint that they exist.
 - If a tool returns an error, fix the call. Do not improvise the outcome instead."""
 
@@ -75,6 +80,27 @@ def get_character(campaign: str, name: str) -> dict:
 def start_combat(campaign: str, combatants: list[str], player_initiatives: dict[str, int]) -> dict:
     """Start a fight. Pass the player's reported initiative as {name: total}; the engine rolls everyone else."""
     return _run(engine.start_combat, campaign, combatants, player_initiatives)
+
+
+@mcp.tool()
+def set_battle_map(campaign: str, width: int, height: int, features: list[dict],
+                   positions: dict[str, list[int]]) -> dict:
+    """Lay out a fight on a grid of 5 ft squares (x east from 0, y south from 0).
+    features: [{name, kind: cover|hazard|wall|exit|other, x, y, w, h}]. positions: {combatant name: [x, y]}.
+    Large creatures take a 2x2 block; give their top-left square and set size 'large' on their sheet."""
+    return _run(engine.set_battle_map, campaign, width, height, features, positions)
+
+
+@mcp.tool()
+def move_token(campaign: str, name: str, x: int, y: int) -> dict:
+    """Move a combatant to a square. Call it for every move, the player's and the creatures'."""
+    return _run(engine.move_token, campaign, name, x, y)
+
+
+@mcp.tool()
+def battle_map(campaign: str) -> dict:
+    """The current grid, features and token positions, for drawing the map."""
+    return _run(engine.battle_map, campaign)
 
 
 @mcp.tool()

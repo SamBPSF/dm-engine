@@ -395,6 +395,10 @@ def next_turn(campaign: str) -> dict:
             break
     _put(campaign, "combat", "combat", s)
     out = {"round": s["round"], "now_acting": _public(e)}
+    if e["kind"] == "pc":
+        out.update(battle_map(campaign))
+        out["draw_grid"] = ("It is the player's turn. Before asking what they do, draw the battle grid from "
+                            "this map: features as labelled shapes, one token per combatant, dead ones removed.")
     if e["kind"] == "pc" and e["hp"] <= 0 and not e.get("stable"):
         out["instruction"] = "The player rolls a death save now. Call death_save with the natural roll."
     elif e["kind"] != "pc":
@@ -411,6 +415,54 @@ def end_combat(campaign: str) -> dict:
     survivors = [_public(_entity(campaign, o["id"])) for o in s["order"]]
     advance = advance_time(campaign, 0.1, "combat")
     return {"combat_over": True, "combatants": survivors, **advance}
+
+
+# ------------------------------------------------------------ battle map
+
+def set_battle_map(campaign: str, width: int, height: int, features: list[dict],
+                   positions: dict[str, list[int]]) -> dict:
+    """Lay out the fight on a grid of 5 ft squares. x counts east from 0, y counts south from 0."""
+    if not (3 <= width <= 30 and 3 <= height <= 30):
+        raise GameError("Keep the grid between 3 and 30 squares each way.")
+    m = {"width": width, "height": height, "features": features, "positions": {}}
+    for name, xy in positions.items():
+        e = _entity(campaign, name)
+        m["positions"][e["id"]] = _square(m, xy)
+    _put(campaign, "map", "map", m)
+    return battle_map(campaign)
+
+
+def _square(m: dict, xy: list[int]) -> list[int]:
+    if len(xy) != 2 or not (0 <= xy[0] < m["width"] and 0 <= xy[1] < m["height"]):
+        raise GameError(f"Square {xy} is off the {m['width']}x{m['height']} grid.")
+    return [int(xy[0]), int(xy[1])]
+
+
+def move_token(campaign: str, name: str, x: int, y: int) -> dict:
+    m = _get(campaign, "map", "map")
+    if m is None:
+        raise GameError("No battle map yet. Call set_battle_map first.")
+    e = _entity(campaign, name)
+    old = m["positions"].get(e["id"])
+    m["positions"][e["id"]] = _square(m, [x, y])
+    _put(campaign, "map", "map", m)
+    feet = None if old is None else 5 * max(abs(old[0] - x), abs(old[1] - y))
+    return {"moved": e["name"], "to": [x, y], "distance_feet": feet}
+
+
+def battle_map(campaign: str) -> dict:
+    m = _get(campaign, "map", "map")
+    if m is None:
+        return {"map": None}
+    tokens = []
+    for id, xy in m["positions"].items():
+        e = _get(campaign, "entity", id)
+        if e is None:
+            continue
+        tokens.append({"name": e["name"], "kind": e["kind"], "x": xy[0], "y": xy[1],
+                       "status": _status(e), "size": e.get("size", "medium")})
+    return {"map": {"width": m["width"], "height": m["height"], "square_feet": 5,
+                    "features": m["features"], "tokens": tokens}}
 
 
 # ------------------------------------------------------- time and clocks
