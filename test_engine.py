@@ -150,4 +150,11 @@ assert "None saved" in g.session_start("fresh")["setting_notes"]
 g.set_setting_notes("fresh", "Ravenloft", "Gothic dread that builds slowly.", ["2e fear and horror checks"])
 assert g.session_start("fresh")["setting_notes"]["setting"] == "Ravenloft"
 
+# the Author gets the procedure and the campaign state; a session guide is flagged at session start
+b = g.author_brief(C4)
+assert "Author's procedure" in b["procedure"] and b["cast"][0]["secret"] == "She sold the map"
+assert "No session guide" in g.session_start(C4)["prepared"]
+g.seal(C4, "next-session", "Open on the bridge.", ["session-1"])
+assert "next-session" in g.session_start(C4)["prepared"]
+
 print("all engine checks passed")

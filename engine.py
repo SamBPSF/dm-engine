@@ -21,11 +21,16 @@ DB_PATH = os.path.join(DATA_DIR, "engine.db")
 
 _rng = secrets.SystemRandom()
 
-try:
-    with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "playbook.md")) as _f:
-        PLAYBOOK = _f.read()
-except OSError:
-    PLAYBOOK = ""
+def _doc(name: str) -> str:
+    try:
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), name)) as f:
+            return f.read()
+    except OSError:
+        return ""
+
+
+PLAYBOOK = _doc("playbook.md")
+AUTHOR = _doc("author.md")
 
 
 # ---------------------------------------------------------------- storage
@@ -646,6 +651,26 @@ def set_setting_notes(campaign: str, setting: str, tone: str, table_rules: list[
     return n
 
 
+def author_brief(campaign: str) -> dict:
+    """Everything the Author needs: the procedure and the full current state of the campaign."""
+    m = _meta(campaign)
+    ents = _all(campaign, "entity")
+    return {
+        "procedure": AUTHOR,
+        "setting_notes": _get(campaign, "setting", "notes") or "None saved yet.",
+        "party": [e for e in ents.values() if e["kind"] in ("pc", "ally")],
+        "creatures_on_file": [e["name"] for e in ents.values() if e["kind"] in ("npc", "creature")],
+        "cast": list(_all(campaign, "card").values()),
+        "clocks": list(_all(campaign, "clock").values()),
+        "sealed_keys": sealed_index(campaign)["entries"],
+        "sessions_played": m["session"],
+        "last_session": m["last_summary"],
+        "open_threads": m["open_threads"],
+        "recent_events": recent_log(campaign, 60)["log"],
+        "secrecy": "Nothing you read or write here may appear in your visible replies.",
+    }
+
+
 # --------------------------------------------------------------- sessions
 
 def session_start(campaign: str) -> dict:
@@ -678,6 +703,9 @@ def session_start(campaign: str) -> dict:
         "setting_notes": _get(campaign, "setting", "notes")
         or "None saved. Ask the player what this game should feel like, then call set_setting_notes.",
         "danger_directive": danger,
+        "prepared": ("A session guide is sealed under 'next-session'. Open it before the first scene."
+                     if _get(campaign, "sealed", "next-session") else
+                     "No session guide is prepared. Run from the sealed entries, or improvise within the playbook."),
         "reminder": "Clocks and sealed entries are hidden from the player. Never show them.",
     }
 

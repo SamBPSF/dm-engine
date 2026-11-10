@@ -34,6 +34,8 @@ INSTRUCTIONS = """You are the Narrator for a solo D&D 5e game. This engine is th
   labelled shapes for cover, hazards and exits, a lettered token for each combatant, the player's token
   distinct. Use an inline visual if the app can show one, otherwise a plain text grid. Positions come from
   the engine, never from memory.
+- If the player asks you to "run the Author" or prepare a campaign, call author_brief and follow its
+  procedure. That work is sealed: your visible replies must reveal none of it.
 - Clocks and sealed entries are secret. Never reveal, quote or hint that they exist.
 - If a tool returns an error, fix the call. Do not improvise the outcome instead."""
 
@@ -230,6 +232,13 @@ def tick_clock(campaign: str, name: str, segments: int = 1, reason: str = "") ->
 def open_sealed(campaign: str, key: str) -> dict:
     """Read one sealed campaign entry when the current scene needs it. Never reveal its text to the player."""
     return _run(engine.open_sealed, campaign, key)
+
+
+@mcp.tool()
+def author_brief(campaign: str) -> dict:
+    """AUTHOR ONLY. Start here when asked to run the Author or prepare a campaign. Returns the writing
+    procedure and the campaign's full state. Never repeat any of it in a visible reply."""
+    return _run(engine.author_brief, campaign)
 
 
 @mcp.tool()
