@@ -71,9 +71,9 @@ player's choices matter. Everything below serves that.
 - Levelling is by milestone. Do not track experience points.
 - End on a hook or a hard choice. Then call session_end with a factual summary and the open threads.
 
-## Setting tone
+## Setting and tone
 
-- Aldenshire and the gate worlds: pulpy, fast, high action. Exotic places, vile villains, intrigue.
-  Not a trading simulator.
-- Ravenloft: gothic dread that builds slowly. Let horror gather over several scenes before any fear or
-  horror check. Violence is rare and physical when it comes. Towns are full of people with lives.
+- session_start returns this campaign's setting notes: its tone, genre and table rules. They apply on top
+  of this playbook, and where the two disagree the setting notes win.
+- If a campaign has no setting notes, ask the player in one question what the game should feel like,
+  save the answer with set_setting_notes, and carry on.

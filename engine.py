@@ -639,6 +639,13 @@ def open_sealed(campaign: str, key: str) -> dict:
             "instruction": "For your eyes only. Use it to run the scene. Never quote or summarise it to the player."}
 
 
+def set_setting_notes(campaign: str, setting: str, tone: str, table_rules: list[str] | None = None) -> dict:
+    """Per-campaign notes that sit on top of the playbook: the setting's name, how it should feel, house rules."""
+    n = {"setting": setting, "tone": tone, "table_rules": table_rules or []}
+    _put(campaign, "setting", "notes", n)
+    return n
+
+
 # --------------------------------------------------------------- sessions
 
 def session_start(campaign: str) -> dict:
@@ -668,6 +675,8 @@ def session_start(campaign: str) -> dict:
         "sealed_keys": sealed_index(campaign)["entries"],
         "cast": [{"name": c["name"], "attitude": c["attitude"]} for c in _all(campaign, "card").values()],
         "playbook": PLAYBOOK,
+        "setting_notes": _get(campaign, "setting", "notes")
+        or "None saved. Ask the player what this game should feel like, then call set_setting_notes.",
         "danger_directive": danger,
         "reminder": "Clocks and sealed entries are hidden from the player. Never show them.",
     }

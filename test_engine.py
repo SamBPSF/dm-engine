@@ -145,4 +145,9 @@ assert g.adjust_attitude(C4, "Mother Hesk", -9, "Vilik lied to her")["attitude"]
 start = g.session_start(C4)
 assert start["cast"][0]["name"] == "Mother Hesk" and "Narrator's playbook" in start["playbook"]
 
+# setting notes are per campaign and come back at session start
+assert "None saved" in g.session_start("fresh")["setting_notes"]
+g.set_setting_notes("fresh", "Ravenloft", "Gothic dread that builds slowly.", ["2e fear and horror checks"])
+assert g.session_start("fresh")["setting_notes"]["setting"] == "Ravenloft"
+
 print("all engine checks passed")

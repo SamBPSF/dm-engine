@@ -202,6 +202,13 @@ def adjust_attitude(campaign: str, name: str, steps: int, reason: str) -> dict:
 
 
 @mcp.tool()
+def set_setting_notes(campaign: str, setting: str, tone: str, table_rules: list[str] | None = None) -> dict:
+    """Save this campaign's setting name, tone and house rules. They apply on top of the playbook
+    and win where the two disagree."""
+    return _run(engine.set_setting_notes, campaign, setting, tone, table_rules)
+
+
+@mcp.tool()
 def rest(campaign: str, kind: str) -> dict:
     """Take a short (1 hour) or long (8 hours) rest. Time passes and clocks may advance."""
     return _run(engine.rest, campaign, kind)
