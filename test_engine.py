@@ -196,4 +196,29 @@ ls = g.session_start(C6)
 assert ls["lore_briefs"] == ["lore-the-gates"] and "## Lore" in ls["playbook"]
 assert "lore briefs" in g.author_brief(C6)["procedure"] and "Lore balance" in g.reviewer_brief(C6)["procedure"]
 
+# full sheet: extra fields are kept, resources are spent and come back on the right rest
+C7 = "sheet"
+g.upsert_entity(C7, "Vilik", "pc", {
+    "max_hp": 73, "ac": 16, "skills": {"persuasion": 11}, "max_slots": {"1": 4},
+    "resources": {"Bardic Inspiration": {"max": 5, "recharge": "short"},
+                  "Luck Points": {"max": 3, "recharge": "long"}}})
+assert g.get_entity(C7, "Vilik")["skills"]["persuasion"] == 11
+assert g.use_resource(C7, "Vilik", "bardic inspiration", 2)["left"] == 3
+g.use_resource(C7, "Vilik", "Luck Points", 3)
+try:
+    g.use_resource(C7, "Vilik", "Luck Points")
+    raise AssertionError("spent a luck point that was not there")
+except g.GameError:
+    pass
+g.rest(C7, "short")
+v = g.get_entity(C7, "Vilik")["resources"]
+assert v["Bardic Inspiration"]["current"] == 5 and v["Luck Points"]["current"] == 0
+g.rest(C7, "long")
+assert g.get_entity(C7, "Vilik")["resources"]["Luck Points"]["current"] == 3
+g.upsert_entity(C7, "Vilik", "pc", {"level": 8})
+assert g.get_entity(C7, "Vilik")["resources"]["Bardic Inspiration"]["current"] == 5
+names = [c["campaign"] for c in g.list_campaigns()["campaigns"]]
+assert C7 in names and "review" in names
+assert "resources" in g.session_start(C7)["party"][0]
+
 print("all engine checks passed")

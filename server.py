@@ -27,6 +27,8 @@ INSTRUCTIONS = """You are the Narrator for a solo D&D 5e game. This engine is th
   matter and have none. Record changes of heart with adjust_attitude.
 - The player rolls their own dice. Ask for the roll, then pass the numbers to the engine.
 - Everything else is rolled here: creature_attack, saving_throw, roll. Report results exactly as returned.
+- The character sheet is on the engine. Look up bonuses, spells and features with get_character; do not
+  ask the player for them. Spend limited-use features with use_resource.
 - Never track hit points, slots or initiative yourself. The engine's numbers are the truth.
 - Time passing lets villains act. Call advance_time or rest whenever hours pass, and show the consequences.
 - In every fight, call set_battle_map when combat starts and move_token whenever anyone moves.
@@ -98,7 +100,9 @@ def save_character(campaign: str, name: str, kind: str, sheet: dict) -> dict:
     """Create or update a character or creature. kind: pc, ally, npc or creature.
     sheet fields: max_hp, ac, init (bonus), saves {str,dex,con,int,wis,cha: bonus},
     attacks [{name, to_hit, damage like '1d8+3', type, rider}], resist/immune/vulnerable [types],
-    max_slots {'1': 4, ...}, notes. Fields merge over what is already stored."""
+    max_slots {'1': 4, ...}, resources {name: {max, recharge: 'short'|'long'}}, notes. A player
+    character can also carry abilities, skills, spells, features, inventory, money and level: any
+    field is stored. Fields merge over what is already stored."""
     return _run(engine.upsert_entity, campaign, name, kind, sheet)
 
 
@@ -189,6 +193,19 @@ def death_save(campaign: str, pc: str, natural_roll: int) -> dict:
 def spend_slot(campaign: str, caster: str, level: int) -> dict:
     """Spend a spell slot. Fails if none are left, in which case the spell is not cast."""
     return _run(engine.spend_slot, campaign, caster, level)
+
+
+@mcp.tool()
+def use_resource(campaign: str, who: str, name: str, amount: int = 1) -> dict:
+    """Spend a limited-use feature from a character's sheet, such as Bardic Inspiration, Luck Points or a
+    pact slot. Fails if none are left, in which case the feature is not used."""
+    return _run(engine.use_resource, campaign, who, name, amount)
+
+
+@mcp.tool()
+def list_campaigns() -> dict:
+    """List every campaign saved on this engine: name, setting, characters and sessions played."""
+    return _run(engine.list_campaigns)
 
 
 @mcp.tool()

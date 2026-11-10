@@ -168,8 +168,28 @@ def upsert_entity(campaign: str, name: str, kind: str, sheet: dict) -> dict:
         e.setdefault("slots", dict(e["max_slots"]))
     if kind == "pc":
         e.setdefault("death", {"successes": 0, "failures": 0})
+    for r in e.get("resources", {}).values():
+        r.setdefault("recharge", "long")
+        r.setdefault("current", r.get("max", 0))
     _put(campaign, "entity", id, e)
     return e
+
+
+def use_resource(campaign: str, who: str, name: str, amount: int = 1) -> dict:
+    """Spend a limited-use feature: Bardic Inspiration, Luck Points, pact slots and the like."""
+    e = _entity(campaign, who)
+    res = e.get("resources", {})
+    key = next((k for k in res if k.lower() == name.lower()), None)
+    if key is None:
+        raise GameError(f"{e['name']} has no resource '{name}'. On the sheet: {', '.join(res) or 'none'}.")
+    r = res[key]
+    r.setdefault("current", r.get("max", 0))
+    if amount < 1 or r["current"] < amount:
+        raise GameError(f"{e['name']} has {r['current']} of {key} left and cannot spend {amount}.")
+    r["current"] -= amount
+    _put(campaign, "entity", e["id"], e)
+    _log(campaign, "resource", f"{e['name']} spends {amount} {key}: {r['current']}/{r.get('max', 0)} left")
+    return {"who": e["name"], "resource": key, "left": r["current"], "max": r.get("max", 0)}
 
 
 def get_entity(campaign: str, name: str) -> dict:
@@ -195,6 +215,9 @@ def _public(e: dict) -> dict:
         out.update({"hp": e["hp"], "max_hp": e["max_hp"], "temp_hp": e["temp_hp"], "ac": e["ac"]})
         if "slots" in e:
             out["slots"] = e["slots"]
+        if e.get("resources"):
+            out["resources"] = {k: f"{r.get('current', r.get('max', 0))}/{r.get('max', 0)}"
+                                for k, r in e["resources"].items()}
     return out
 
 
@@ -608,19 +631,24 @@ def rest(campaign: str, kind: str) -> dict:
     if kind not in ("short", "long"):
         raise GameError("kind must be short or long.")
     restored = []
-    if kind == "long":
-        for id, e in _all(campaign, "entity").items():
-            if e["kind"] in ("pc", "ally") and not e.get("dead"):
-                e["hp"] = e["max_hp"]
-                if "max_slots" in e:
-                    e["slots"] = dict(e["max_slots"])
-                e["conditions"] = [c for c in e["conditions"] if c != "unconscious"]
-                _put(campaign, "entity", id, e)
-                restored.append(e["name"])
+    for id, e in _all(campaign, "entity").items():
+        if e["kind"] not in ("pc", "ally") or e.get("dead"):
+            continue
+        for r in e.get("resources", {}).values():
+            if kind == "long" or r.get("recharge", "long") == "short":
+                r["current"] = r.get("max", 0)
+        if kind == "long":
+            e["hp"] = e["max_hp"]
+            if "max_slots" in e:
+                e["slots"] = dict(e["max_slots"])
+            e["conditions"] = [c for c in e["conditions"] if c != "unconscious"]
+            restored.append(e["name"])
+        _put(campaign, "entity", id, e)
     out = advance_time(campaign, 8 if kind == "long" else 1, f"{kind} rest")
     out["restored"] = restored
     if kind == "short":
-        out["note"] = "Short rest: the player spends hit dice and rolls them; record the result with heal."
+        out["note"] = ("Short rest: features that recharge on a short rest are restored. The player spends "
+                       "hit dice and rolls them; record the result with heal.")
     return out
 
 
@@ -672,6 +700,20 @@ def author_brief(campaign: str) -> dict:
     }
 
 
+def list_campaigns() -> dict:
+    """Every campaign saved on this engine, with enough to tell them apart."""
+    with _db() as con:
+        names = [r[0] for r in con.execute("SELECT DISTINCT campaign FROM doc ORDER BY campaign")]
+    out = []
+    for c in names:
+        m = _meta(c)
+        notes = _get(c, "setting", "notes") or {}
+        pcs = [e["name"] for e in _all(c, "entity").values() if e["kind"] == "pc"]
+        out.append({"campaign": c, "setting": notes.get("setting", ""), "characters": pcs,
+                    "sessions_played": m["session"], "last_session": m["last_summary"][:160]})
+    return {"campaigns": out}
+
+
 # --------------------------------------------------------------- sessions
 
 def session_start(campaign: str) -> dict:
@@ -715,6 +757,9 @@ def session_start(campaign: str) -> dict:
         "cast": [{"name": c["name"], "attitude": c["attitude"]} for c in _all(campaign, "card").values()],
         "playbook": PLAYBOOK,
         "grounding": grounding,
+        "sheets": ("Full character sheets are on file. Call get_character for skills, saves, spells, features "
+                   "and inventory instead of asking the player for them. Spend limited-use features with "
+                   "use_resource and spell slots with spend_slot."),
         "common_knowledge": ck["content"] if ck else None,
         "lore_briefs": [v["key"] for v in _all(campaign, "sealed").values() if v["key"].startswith("lore-")],
         "setting_notes": _get(campaign, "setting", "notes")
