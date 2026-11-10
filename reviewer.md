@@ -24,6 +24,9 @@ first, keeping only the last three sessions.
   If the campaign has no `common-knowledge` entry, write one now from the brief (it is not secret: what
   the character would plainly know about themselves, their companions, their work and their world, under
   350 words, covering every name used so far). If it exists, add any name the player stumbled on.
+- **Lore balance.** Was there too little explanation or too much? Note any subject the player had to
+  ask about or seemed to guess at, and write a `lore-<subject>` brief for it (not secret, 100 to 200
+  words of common knowledge). Note any stretch where explanation stalled the scene.
 - **Honesty.** Did the Narrator soften a result, hand over information unearned, reveal sealed material,
   narrate the player's feelings, or lecture? Quote the moment if so.
 - **The player's feedback.** For each standing note from the player, was it honoured?

@@ -716,6 +716,7 @@ def session_start(campaign: str) -> dict:
         "playbook": PLAYBOOK,
         "grounding": grounding,
         "common_knowledge": ck["content"] if ck else None,
+        "lore_briefs": [v["key"] for v in _all(campaign, "sealed").values() if v["key"].startswith("lore-")],
         "setting_notes": _get(campaign, "setting", "notes")
         or "None saved. Ask the player what this game should feel like, then call set_setting_notes.",
         "danger_directive": danger,

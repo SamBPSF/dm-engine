@@ -61,6 +61,12 @@ consequences, and slow pacing. Everything you write should be an answer to those
    granted; recent events that are common talk. Include every name the opening scene uses. Leave out
    anything the character would have to discover.
 
+   Then write **lore briefs** (keys `lore-<subject>`, also NOT secret): one for each place, faction,
+   institution, custom or object the player is likely to meet in this adventure and would not
+   understand unaided. Each is 100 to 200 words of what is commonly known: what it is, why it matters,
+   what people say about it. The Narrator reads these out, more or less as written, when the subject
+   first matters. Six to ten is usually right. Keep anything sealed out of them.
+
 10. **The opening** (key `opening`). It follows the "where you stand" briefing, so it can start in
     motion: a specific place, something happening, a choice within the Narrator's first scene. It may
     use only names from `common-knowledge`, or introduce a new one on the spot with a face and a role.

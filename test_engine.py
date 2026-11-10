@@ -190,4 +190,10 @@ g.session_end(C6, "x", [])
 assert "has been given the basics" in g.session_start(C6)["grounding"]
 assert "Grounding the player" in first["playbook"] and "common-knowledge" in g.author_brief(C6)["procedure"]
 
+# lore briefs are listed at session start so the Narrator knows what is prepared
+g.seal(C6, "lore-the-gates", "The gates are stone arches opened by command words.")
+ls = g.session_start(C6)
+assert ls["lore_briefs"] == ["lore-the-gates"] and "## Lore" in ls["playbook"]
+assert "lore briefs" in g.author_brief(C6)["procedure"] and "Lore balance" in g.reviewer_brief(C6)["procedure"]
+
 print("all engine checks passed")
