@@ -21,6 +21,12 @@ DB_PATH = os.path.join(DATA_DIR, "engine.db")
 
 _rng = secrets.SystemRandom()
 
+try:
+    with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "playbook.md")) as _f:
+        PLAYBOOK = _f.read()
+except OSError:
+    PLAYBOOK = ""
+
 
 # ---------------------------------------------------------------- storage
 
@@ -465,6 +471,69 @@ def battle_map(campaign: str) -> dict:
                     "features": m["features"], "tokens": tokens}}
 
 
+# ----------------------------------------------------- checks and cards
+
+def set_check(campaign: str, who: str, skill: str, dc: int, on_failure: str, on_success: str = "") -> dict:
+    """Commit the difficulty and the stakes of a player's check before they roll."""
+    e = _entity(campaign, who)
+    if not 1 <= dc <= 40:
+        raise GameError("dc should be between 1 and 40.")
+    if not on_failure.strip():
+        raise GameError("Say what failure costs. If failure would change nothing, do not ask for a roll.")
+    _put(campaign, "check", "pending", {"who": e["name"], "skill": skill, "dc": dc,
+                                        "on_failure": on_failure, "on_success": on_success})
+    return {"committed": True, "ask_player": f"Roll {skill} for {e['name']} and report the total.",
+            "instruction": "Do not tell the player the difficulty. Call resolve_check with their total."}
+
+
+def resolve_check(campaign: str, total: int) -> dict:
+    c = _get(campaign, "check", "pending")
+    if not c:
+        raise GameError("No check is pending. Call set_check before the player rolls.")
+    _put(campaign, "check", "pending", None)
+    success = total >= c["dc"]
+    margin = total - c["dc"]
+    _log(campaign, "check", f"{c['who']} {c['skill']} {total} vs DC {c['dc']}: {'success' if success else 'failure'}")
+    return {"who": c["who"], "skill": c["skill"], "success": success, "margin": margin,
+            "result": c["on_success"] if success else c["on_failure"],
+            "instruction": "This outcome was committed before the roll. Narrate it; do not soften it."}
+
+
+ATTITUDES = ["hostile", "unfriendly", "wary", "neutral", "warm", "friendly", "devoted"]
+
+
+def save_card(campaign: str, name: str, card: dict) -> dict:
+    """A character card: want, voice, secret, signature_line, attitude, notes. Fields merge."""
+    id = _slug(name)
+    c = _get(campaign, "card", id, {"name": name, "attitude": "neutral", "history": []})
+    c.update({k: v for k, v in card.items() if k != "history"})
+    if c["attitude"] not in ATTITUDES:
+        raise GameError(f"attitude must be one of: {', '.join(ATTITUDES)}.")
+    _put(campaign, "card", id, c)
+    return c
+
+
+def get_card(campaign: str, name: str) -> dict:
+    c = _get(campaign, "card", _slug(name))
+    if c is None:
+        known = ", ".join(v["name"] for v in _all(campaign, "card").values()) or "none yet"
+        raise GameError(f"No card for '{name}'. Known: {known}. Create one with save_card before voicing them.")
+    return {**c, "instruction": "Play the want, the voice and the secret. Never state the secret outright."}
+
+
+def adjust_attitude(campaign: str, name: str, steps: int, reason: str) -> dict:
+    id = _slug(name)
+    c = _get(campaign, "card", id)
+    if c is None:
+        raise GameError(f"No card for '{name}'.")
+    i = max(0, min(len(ATTITUDES) - 1, ATTITUDES.index(c["attitude"]) + steps))
+    c["attitude"] = ATTITUDES[i]
+    c["history"] = (c.get("history", []) + [reason])[-12:]
+    _put(campaign, "card", id, c)
+    _log(campaign, "attitude", f"{c['name']} is now {c['attitude']}: {reason}")
+    return {"name": c["name"], "attitude": c["attitude"], "remembers": c["history"]}
+
+
 # ------------------------------------------------------- time and clocks
 
 def set_clock(campaign: str, name: str, segments: int, steps: list[str],
@@ -597,6 +666,8 @@ def session_start(campaign: str) -> dict:
                     "next": c["steps"][c["filled"]] if c["filled"] < c["segments"] else "complete"}
                    for c in _all(campaign, "clock").values()],
         "sealed_keys": sealed_index(campaign)["entries"],
+        "cast": [{"name": c["name"], "attitude": c["attitude"]} for c in _all(campaign, "card").values()],
+        "playbook": PLAYBOOK,
         "danger_directive": danger,
         "reminder": "Clocks and sealed entries are hidden from the player. Never show them.",
     }

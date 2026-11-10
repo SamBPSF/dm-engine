@@ -116,4 +116,33 @@ assert t["now_acting"]["name"] == "Wolf" and "map" not in t
 t = g.next_turn(C3)
 assert t["now_acting"]["name"] == "Vilik" and t["map"]["tokens"] and "draw_grid" in t
 
+# skill checks: stakes are committed before the roll and come back unchanged
+C4 = "story"
+g.upsert_entity(C4, "Vilik", "pc", {"max_hp": 40, "ac": 15})
+try:
+    g.resolve_check(C4, 15)
+    raise AssertionError("resolved a check that was never set")
+except g.GameError:
+    pass
+try:
+    g.set_check(C4, "Vilik", "Persuasion", 15, "")
+    raise AssertionError("accepted a check with no cost of failure")
+except g.GameError:
+    pass
+g.set_check(C4, "Vilik", "Persuasion", 15, "The guard calls the captain.", "The guard looks away.")
+r = g.resolve_check(C4, 14)
+assert not r["success"] and r["margin"] == -1 and "captain" in r["result"]
+g.set_check(C4, "Vilik", "Stealth", 12, "Seen.", "Unseen.")
+assert g.resolve_check(C4, 12)["success"]
+
+# character cards: wants, secrets and attitudes that remember why they changed
+g.save_card(C4, "Mother Hesk", {"want": "Her son back from the mine", "voice": "Dry, exact, never raises it",
+                                 "secret": "She sold the map", "attitude": "wary"})
+assert g.get_card(C4, "mother hesk")["secret"] == "She sold the map"
+a = g.adjust_attitude(C4, "Mother Hesk", 2, "Vilik brought word of her son")
+assert a["attitude"] == "warm" and len(a["remembers"]) == 1
+assert g.adjust_attitude(C4, "Mother Hesk", -9, "Vilik lied to her")["attitude"] == "hostile"
+start = g.session_start(C4)
+assert start["cast"][0]["name"] == "Mother Hesk" and "Narrator's playbook" in start["playbook"]
+
 print("all engine checks passed")

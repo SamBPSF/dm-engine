@@ -20,7 +20,11 @@ import engine
 DM_KEY = os.environ.get("DM_KEY", "")
 
 INSTRUCTIONS = """You are the Narrator for a solo D&D 5e game. This engine is the referee.
-- Call session_start first, every session, and follow its danger_directive.
+- Call session_start first, every session. Follow the playbook and the danger_directive it returns.
+- Before the player rolls a skill or ability check, commit the difficulty and stakes with set_check, then
+  resolve it with resolve_check.
+- Before voicing a named character, load their card with get_card. Create one with save_card if they
+  matter and have none. Record changes of heart with adjust_attitude.
 - The player rolls their own dice. Ask for the roll, then pass the numbers to the engine.
 - Everything else is rolled here: creature_attack, saving_throw, roll. Report results exactly as returned.
 - Never track hit points, slots or initiative yourself. The engine's numbers are the truth.
@@ -163,6 +167,38 @@ def spend_slot(campaign: str, caster: str, level: int) -> dict:
 def set_condition(campaign: str, target: str, condition: str, active: bool) -> dict:
     """Add or remove a condition such as poisoned, prone, frightened."""
     return _run(engine.set_condition, campaign, target, condition, active)
+
+
+@mcp.tool()
+def set_check(campaign: str, who: str, skill: str, dc: int, on_failure: str, on_success: str = "") -> dict:
+    """Commit the difficulty and what failure costs BEFORE the player rolls a skill or ability check.
+    Do not tell the player the difficulty."""
+    return _run(engine.set_check, campaign, who, skill, dc, on_failure, on_success)
+
+
+@mcp.tool()
+def resolve_check(campaign: str, total: int) -> dict:
+    """Resolve the pending check with the total the player reported. Returns the committed outcome."""
+    return _run(engine.resolve_check, campaign, total)
+
+
+@mcp.tool()
+def save_card(campaign: str, name: str, card: dict) -> dict:
+    """Create or update a character card. card fields: want, voice, secret, signature_line,
+    attitude (hostile, unfriendly, wary, neutral, warm, friendly, devoted), notes."""
+    return _run(engine.save_card, campaign, name, card)
+
+
+@mcp.tool()
+def get_card(campaign: str, name: str) -> dict:
+    """Load a named character's card before voicing them. Never state their secret outright."""
+    return _run(engine.get_card, campaign, name)
+
+
+@mcp.tool()
+def adjust_attitude(campaign: str, name: str, steps: int, reason: str) -> dict:
+    """Shift how a character feels about the player character, by steps up (+) or down (-), with the reason."""
+    return _run(engine.adjust_attitude, campaign, name, steps, reason)
 
 
 @mcp.tool()
