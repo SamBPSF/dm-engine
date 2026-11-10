@@ -53,10 +53,19 @@ consequences, and slow pacing. Everything you write should be an answer to those
 8. **Two hard choices** (key `dilemmas`). Situations with no clean answer, where each option costs
    something the player has come to value.
 
-9. **The opening** (key `opening`). A scene already in motion, in a specific place, that ends on a choice
-   within the Narrator's first reply.
+9. **What the character knows** (key `common-knowledge`). This entry is NOT secret. It is what the
+   Narrator tells the player at the start of the first session and draws on afterwards. In plain words,
+   under about 350 words: who the character is right now and what they do for a living; where they are
+   and why; each companion by name, role and one line of shared history; their employer or order and how
+   it works day to day; the handful of places, objects and terms everyone in this world takes for
+   granted; recent events that are common talk. Include every name the opening scene uses. Leave out
+   anything the character would have to discover.
 
-10. **Session guide** (key `next-session`). What the Narrator should open first, the two or three scenes
+10. **The opening** (key `opening`). It follows the "where you stand" briefing, so it can start in
+    motion: a specific place, something happening, a choice within the Narrator's first scene. It may
+    use only names from `common-knowledge`, or introduce a new one on the spot with a face and a role.
+
+11. **Session guide** (key `next-session`). What the Narrator should open first, the two or three scenes
     most likely to happen, which clock is closest to moving, and what the session should end on.
 
 Keep every sealed entry under about 400 words so the Narrator can load only what a scene needs. Tag each
@@ -68,5 +77,7 @@ entry with the session it is most likely needed in.
 - Is there a moment in the first session where the character can be hurt?
 - If the player takes two long rests, does something they care about get worse?
 - Does every vital secret have three routes to it?
+- Could someone who has read nothing follow the first ten minutes? Is every name in the opening either
+  in `common-knowledge` or introduced with a face and a role?
 - Is there anything the player is required to do for the story to continue? If so, add another way.
 - Is anything written here that only works if the Narrator tells the player what to think?

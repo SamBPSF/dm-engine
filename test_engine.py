@@ -180,4 +180,14 @@ assert s2["player_feedback"] == ["The harbour scene dragged."]
 g.session_end(C5, "More happened.", [])
 assert "never reviewed" in g.session_start(C5)["review_status"]
 
+# grounding: the primer is delivered once, then recalled; a campaign without one still orients the player
+assert "No common knowledge" in g.session_start("bare")["grounding"]
+C6 = "ground"
+g.seal(C6, "common-knowledge", "You are Vilik, a gate trader. Hesk is your quartermaster.")
+first = g.session_start(C6)
+assert "where you stand" in first["grounding"] and "Hesk" in first["common_knowledge"]
+g.session_end(C6, "x", [])
+assert "has been given the basics" in g.session_start(C6)["grounding"]
+assert "Grounding the player" in first["playbook"] and "common-knowledge" in g.author_brief(C6)["procedure"]
+
 print("all engine checks passed")

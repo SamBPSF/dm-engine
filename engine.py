@@ -681,6 +681,18 @@ def session_start(campaign: str) -> dict:
     m["session_started"] = time.time()
     _put(campaign, "meta", "meta", m)
     ents = _all(campaign, "entity")
+    ck = _get(campaign, "sealed", "common-knowledge")
+    if ck and not m.get("primer_given"):
+        grounding = ("Before the first scene, give the player 'where you stand' from common_knowledge: who "
+                     "they are, where and why, who is with them, what everyone knows. They have not had it yet.")
+        m["primer_given"] = True
+        _put(campaign, "meta", "meta", m)
+    elif ck:
+        grounding = "The player has been given the basics. Re-attach names to faces in the recap."
+    else:
+        grounding = ("No common knowledge is written for this campaign. Before the first scene, tell the "
+                     "player plainly what their character would know: who they are, where and why, who is "
+                     "with them. Introduce every name with a face and a role.")
     quiet = m["session"] - 1 - m["last_danger_session"]
     if m["session"] == 1:
         danger = "First session. Establish a real threat early so the stakes are felt."
@@ -702,6 +714,8 @@ def session_start(campaign: str) -> dict:
         "sealed_keys": sealed_index(campaign)["entries"],
         "cast": [{"name": c["name"], "attitude": c["attitude"]} for c in _all(campaign, "card").values()],
         "playbook": PLAYBOOK,
+        "grounding": grounding,
+        "common_knowledge": ck["content"] if ck else None,
         "setting_notes": _get(campaign, "setting", "notes")
         or "None saved. Ask the player what this game should feel like, then call set_setting_notes.",
         "danger_directive": danger,
