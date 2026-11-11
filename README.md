@@ -29,6 +29,11 @@ Add a custom connector with the URL `https://<domain>/mcp` and a request header:
 
     x-api-key: <your DM_KEY>
 
+## Characters
+
+Player characters are kept in a library, apart from any campaign. Each new campaign takes a rested copy.
+What happens in play stays in that campaign; the library copy changes only when the player asks.
+
 ## Adding setting books
 
 In a chat, ask the DM for a link to add books to a setting. It makes a private page, good for one hour,

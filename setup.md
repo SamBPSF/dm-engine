@@ -7,8 +7,8 @@ possible. The lists returned with this guide show the settings, characters and t
    not ask again. In ONE message, ask only for what is missing:
    - **Setting.** A saved setting by name, a new one described in a few sentences, a published setting
      they own books for, or "invent one" with the feel they want (genre, tone).
-   - **Character.** A saved character by name, or a new one. For a new one, ask them to attach or paste
-     the character sheet.
+   - **Character.** A character from the library by name, or a new one. For a new one, ask them to
+     attach or paste the character sheet.
    - **Length.** A short adventure of two or three sessions, or something longer. If they do not say,
      assume short.
    If there is exactly one saved character and they did not mention another, assume that character.
@@ -18,15 +18,16 @@ possible. The lists returned with this guide show the settings, characters and t
    back to this game.
 
 3. **Call create_campaign.** Pass the setting name. Pass a description and tone only for a new or
-   invented setting; a saved setting is copied automatically. Pass the character name to copy a saved
-   character, fully rested. Leave table_rules empty to reuse the player's saved rules.
+   invented setting; a saved setting is copied automatically. Pass the character name to copy that
+   character from the library, fully rested. Leave table_rules empty to reuse the player's saved rules.
 
    **If the player has books or long notes for the setting** and create_campaign reports none on the
    shelf, call lore_upload_link with the setting name, give them the link, and wait until they say the
    books are in. Check with lore_shelf. Then carry on. Do not ask them to paste a book into the chat.
 
-4. **New character only:** save the full sheet with save_character (abilities, saves, skills, spells,
-   slots, resources, features, inventory) before going on.
+4. **New character only:** save the full sheet to the library with library_save (abilities, saves,
+   skills, spells, slots, resources, features, attacks, inventory), then save the same sheet into the new
+   campaign with save_character, kind `pc`, before going on.
 
 5. **Run the Author.** Call author_brief for the new campaign and follow its procedure. That work is
    sealed: reveal none of it.

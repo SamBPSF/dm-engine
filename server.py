@@ -40,6 +40,9 @@ INSTRUCTIONS = """You are the Narrator for a solo D&D 5e game. This engine is th
   at the start of the player's turn, how conditions change their rolls. Say that before they roll.
 - Companions are yours to play. On their turn they act from their own card without being asked. At 0 hit
   points they are dying, not dead: the engine rolls their death saves and they can be saved or lost.
+- The player's characters live in a library, apart from any campaign. A new campaign takes a rested copy.
+  To add a character, save the whole sheet with library_save. Changes made in play stay in the campaign;
+  the library copy is updated only when the player says so (library_save with from_campaign).
 - If session_start lists books on the lore shelf, they are the setting's canon. Use lore_search before
   describing a place, person, creature or piece of history they might cover. Tell it in your own words,
   as what the character knows; never paste passages, and keep back what the character has not learned.
@@ -118,7 +121,8 @@ def roll(campaign: str, expression: str, reason: str) -> dict:
 
 @mcp.tool()
 def save_character(campaign: str, name: str, kind: str, sheet: dict) -> dict:
-    """Create or update a character or creature. kind: pc, ally (fights on the player's side), npc
+    """Create or update a character or creature in ONE campaign. A player character the player wants
+    for other games goes in the library as well (library_save). kind: pc, ally (fights on the player's side), npc
     (bystander or undecided) or creature (enemy). The kind sets the token colour on the battle grid.
     sheet fields: max_hp, ac, init (bonus), saves {str,dex,con,int,wis,cha: bonus},
     attacks [{name, to_hit, damage like '1d8+3', type, rider, count}], attacks_per_round,
@@ -346,6 +350,33 @@ def set_setting_notes(campaign: str, setting: str, tone: str, table_rules: list[
     """Save this campaign's setting name, tone, house rules and a description of the world. They apply
     on top of the playbook and win where the two disagree."""
     return _run(engine.set_setting_notes, campaign, setting, tone, table_rules, description)
+
+
+@mcp.tool()
+def character_library(name: str = "") -> dict:
+    """The player's saved characters, kept apart from any campaign. No name: list them. With a name: that
+    character's full master sheet and the campaigns they are in."""
+    return _run(engine.character_library, name)
+
+
+@mcp.tool()
+def library_save(name: str, sheet: dict | None = None, from_campaign: str = "") -> dict:
+    """Add a character to the library or update the one there. Pass the full sheet (same fields as
+    save_character; later calls merge), OR from_campaign to take that campaign's current version, for
+    example after levelling up. Only on the player's say-so: this is what every new campaign starts from."""
+    return _run(engine.library_save, name, sheet, from_campaign)
+
+
+@mcp.tool()
+def library_retire(name: str, retired: bool = True) -> dict:
+    """Stop offering a library character for new campaigns (or bring them back). Nothing is deleted."""
+    return _run(engine.library_retire, name, retired)
+
+
+@mcp.tool()
+def library_restore_previous(name: str) -> dict:
+    """Undo the last library_save for a character."""
+    return _run(engine.library_restore_previous, name)
 
 
 @mcp.tool()
