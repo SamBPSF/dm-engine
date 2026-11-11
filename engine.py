@@ -261,7 +261,9 @@ def _status(e: dict) -> str:
     if e.get("dead"):
         return "dead"
     if e["hp"] <= 0:
-        return "down and dying" if e["kind"] == "pc" else "dead"
+        if e["kind"] in ("pc", "ally"):
+            return "down but stable" if e.get("stable") else "down and dying"
+        return "dead"
     frac = e["hp"] / e["max_hp"]
     if frac <= 0.25:
         return "badly hurt"
@@ -304,26 +306,33 @@ def apply_damage(campaign: str, target: str, amount: int, damage_type: str = "",
     before = e["hp"]
     e["hp"] = max(0, e["hp"] - dealt)
     events = []
-    if e["kind"] == "pc":
-        m = _meta(campaign)
-        m["session_damage"] += dealt
-        if e["hp"] <= e["max_hp"] / 2 and dealt > 0:
-            m["last_danger_session"] = m["session"]
-        _put(campaign, "meta", "meta", m)
+    if e["kind"] in ("pc", "ally"):
+        who = "The character" if e["kind"] == "pc" else e["name"]
+        if e["kind"] == "pc":
+            m = _meta(campaign)
+            m["session_damage"] += dealt
+            if e["hp"] <= e["max_hp"] / 2 and dealt > 0:
+                m["last_danger_session"] = m["session"]
+            _put(campaign, "meta", "meta", m)
+        e.setdefault("death", {"successes": 0, "failures": 0})
         if was_down and dealt > 0 and not e.get("dead"):
             e["death"]["failures"] += 2 if crit else 1
+            e["stable"] = False
             events.append(f"Damage while down: death save failure ({e['death']['failures']}/3).")
         elif e["hp"] == 0 and dealt - before >= e["max_hp"]:
             e["dead"] = True
-            events.append("Massive damage: the character is killed outright.")
+            events.append(f"Massive damage: {who} is killed outright.")
         elif e["hp"] == 0 and not was_down:
             e["death"] = {"successes": 0, "failures": 0}
+            e["stable"] = False
             if "unconscious" not in e["conditions"]:
                 e["conditions"].append("unconscious")
-            events.append("The character drops to 0 HP: unconscious and making death saves.")
-        if e["death"]["failures"] >= 3:
+            events.append(f"{who} drops to 0 HP: unconscious and making death saves."
+                          + ("" if e["kind"] == "pc" else " The engine rolls them on this companion's turns. "
+                             "They can be stabilised or healed before the third failure."))
+        if e["death"]["failures"] >= 3 and not e.get("dead"):
             e["dead"] = True
-            events.append("Three failures: the character is dead.")
+            events.append(f"Three failures: {who} is dead.")
     elif e["hp"] == 0:
         e["dead"] = True
         events.append(f"{e['name']} is killed.")
@@ -367,23 +376,227 @@ def heal(campaign: str, target: str, amount: int) -> dict:
     if e.get("dead"):
         raise GameError(f"{e['name']} is dead. Healing does nothing.")
     e["hp"] = min(e["max_hp"], e["hp"] + max(0, amount))
-    if e["hp"] > 0 and "unconscious" in e["conditions"]:
-        e["conditions"].remove("unconscious")
-        if e["kind"] == "pc":
+    if e["hp"] > 0:
+        _drop_condition(e, "unconscious")
+        e["stable"] = False
+        if "death" in e:
             e["death"] = {"successes": 0, "failures": 0}
     _put(campaign, "entity", e["id"], e)
     return {"target": _public(e)}
 
 
-def set_condition(campaign: str, target: str, condition: str, active: bool) -> dict:
+# ------------------------------------------------------------- conditions
+
+CONDITION_RULES = {
+    "blinded": "Cannot see and fails any check that needs sight. Its attacks have disadvantage; attacks "
+               "against it have advantage.",
+    "charmed": "Cannot attack the charmer or target them with anything harmful. The charmer has advantage "
+               "on social checks with it.",
+    "deafened": "Cannot hear and fails any check that needs hearing.",
+    "frightened": "Disadvantage on attacks and ability checks while the source of the fear is in sight. "
+                  "Cannot willingly move closer to it.",
+    "grappled": "Speed 0. Disadvantage on attacks against anyone but the grappler. Ends if the grappler is "
+                "incapacitated or the two are forced apart.",
+    "incapacitated": "No actions, bonus actions or reactions. Concentration ends. Cannot speak.",
+    "invisible": "Cannot be seen without magic or a special sense. Its attacks have advantage; attacks "
+                 "against it have disadvantage.",
+    "paralyzed": "No actions, speed 0. Fails Strength and Dexterity saves. Attacks against it have "
+                 "advantage, and a hit from within 5 ft is a critical hit.",
+    "petrified": "Turned to stone: no actions, speed 0, resists all damage. Fails Strength and Dexterity "
+                 "saves. Attacks against it have advantage.",
+    "poisoned": "Disadvantage on attack rolls and ability checks.",
+    "prone": "Can only crawl; standing up costs half its speed. Its attacks have disadvantage. Attacks "
+             "against it have advantage from within 5 ft and disadvantage from further away.",
+    "restrained": "Speed 0. Its attacks have disadvantage; attacks against it have advantage. Disadvantage "
+                  "on Dexterity saves.",
+    "stunned": "No actions. Fails Strength and Dexterity saves. Attacks against it have advantage.",
+    "unconscious": "No actions, prone, unaware, drops what it holds. Fails Strength and Dexterity saves. "
+                   "Attacks against it have advantage, and a hit from within 5 ft is a critical hit.",
+    "exhaustion": "Each level: -2 on every d20 roll and -5 ft of speed. Death at level 6. A long rest "
+                  "removes one level. Record it as 'exhaustion 1', 'exhaustion 2' and so on.",
+}
+_NO_ACTIONS = {"incapacitated", "paralyzed", "petrified", "stunned", "unconscious"}
+_OWN_ATTACKS_DISADV = {"blinded", "frightened", "poisoned", "prone", "restrained"}
+_ATTACKED_WITH_ADV = {"blinded", "paralyzed", "petrified", "restrained", "stunned", "unconscious"}
+_FAILS_STR_DEX = {"paralyzed", "petrified", "stunned", "unconscious"}
+_CRIT_WHEN_ADJACENT = {"paralyzed", "unconscious"}
+
+
+def _conds(e: dict) -> set[str]:
+    """Condition names without any level, so 'exhaustion 2' reads as 'exhaustion'."""
+    return {c.split()[0] for c in e.get("conditions", []) if c}
+
+
+def _exhaustion(e: dict) -> int:
+    for c in e.get("conditions", []):
+        parts = c.split()
+        if parts and parts[0] == "exhaustion":
+            return int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 1
+    return 0
+
+
+def _drop_condition(e: dict, name: str) -> bool:
+    name = name.lower().strip()
+    had = [c for c in e.get("conditions", []) if c == name or c.split()[0] == name]
+    e["conditions"] = [c for c in e.get("conditions", []) if c not in had]
+    for c in had:
+        e.get("condition_info", {}).pop(c, None)
+    return bool(had)
+
+
+def _condition_line(e: dict, c: str) -> dict:
+    info = e.get("condition_info", {}).get(c, {})
+    line = {"condition": c, "rule": CONDITION_RULES.get(c.split()[0], "No standard rule: apply it as described when it was set.")}
+    if info.get("rounds"):
+        line["rounds_left"] = info["rounds"]
+    if info.get("save_dc"):
+        line["ends_on"] = f"{info['save_ability']} save, DC {info['save_dc']}, at the end of each of its turns"
+    if info.get("source"):
+        line["source"] = info["source"]
+    return line
+
+
+def set_condition(campaign: str, target: str, condition: str, active: bool, rounds: int = 0,
+                  save_ability: str = "", save_dc: int = 0, source: str = "") -> dict:
+    """Put a condition on someone or take it off. rounds: it ends by itself after that many of the target's
+    turns. save_ability and save_dc: the target repeats that save at the end of each of its turns and the
+    condition ends on a success. source: who or what caused it."""
     e = _entity(campaign, target)
-    c = condition.lower()
-    if active and c not in e["conditions"]:
+    c = " ".join(condition.lower().split())
+    # Durations can also ride in the name, for chats without the newer parameters:
+    # 'poisoned for 3 rounds' or 'frightened, save wis 14'.
+    m = re.search(r"[,;]?\s*\(?for (\d+) rounds?\)?", c)
+    if m:
+        rounds, c = rounds or int(m.group(1)), (c[:m.start()] + c[m.end():]).strip(" ,;")
+    m = re.search(r"[,;]?\s*\(?save (str|dex|con|int|wis|cha)\w*,? (?:dc ?)?(\d+)\)?", c)
+    if m:
+        save_ability, save_dc = save_ability or m.group(1), save_dc or int(m.group(2))
+        c = (c[:m.start()] + c[m.end():]).strip(" ,;")
+    if not c:
+        raise GameError("Name the condition.")
+    if not active:
+        _drop_condition(e, c)
+        _put(campaign, "entity", e["id"], e)
+        return {"target": _public(e), "removed": c}
+    if c.split()[0] == "exhaustion":
+        _drop_condition(e, "exhaustion")  # one level at a time on file
+        if _exhaustion({"conditions": [c]}) >= 6:
+            e["dead"] = True
+    if c not in e["conditions"]:
         e["conditions"].append(c)
-    if not active and c in e["conditions"]:
-        e["conditions"].remove(c)
+    info = {k: v for k, v in {"rounds": int(rounds), "save_ability": save_ability.lower()[:3],
+                              "save_dc": int(save_dc), "source": source}.items() if v}
+    e.setdefault("condition_info", {})[c] = info
+    if _conds(e) & _NO_ACTIONS and e.get("concentrating"):
+        info["note"] = f"Concentration on {e['concentrating']} ends."
+        e["concentrating"] = ""
     _put(campaign, "entity", e["id"], e)
-    return {"target": _public(e)}
+    _log(campaign, "condition", f"{e['name']} is {c}" + (f" for {rounds} rounds" if rounds else "")
+         + (f" ({source})" if source else ""))
+    out = {"target": _public(e), **_condition_line(e, c)}
+    if not rounds and not save_dc and c.split()[0] not in ("exhaustion", "unconscious"):
+        out["lasts"] = ("Until you remove it. To have the engine end it, set rounds or a repeated save "
+                        "(or name it like 'poisoned for 3 rounds' or 'frightened, save wis 14').")
+    if info.get("note"):
+        out["note"] = info["note"]
+    if e.get("dead"):
+        out["note"] = "Exhaustion level 6: dead."
+    return out
+
+
+def _end_of_turn(campaign: str, e: dict) -> list[str]:
+    """Count down this creature's conditions as its turn ends. Returns what the Narrator must report or do."""
+    events = []
+    for c in list(e.get("conditions", [])):
+        info = e.get("condition_info", {}).get(c)
+        if not info:
+            continue
+        if info.get("save_dc"):
+            ab, dc = info["save_ability"], info["save_dc"]
+            if e["kind"] == "pc":
+                events.append(f"{e['name']} may shake off '{c}': the player rolls a {ab.upper()} save, DC {dc}. "
+                              f"Call saving_throw with player_total and ends_condition '{c}'.")
+            elif ab in ("str", "dex") and _conds(e) & _FAILS_STR_DEX:
+                events.append(f"{e['name']} cannot shake off '{c}' (fails {ab.upper()} saves in this state).")
+            else:
+                nat, _ = _d20()
+                total = nat + int(e.get("saves", {}).get(ab, 0)) - 2 * _exhaustion(e)
+                if total >= dc:
+                    _drop_condition(e, c)
+                    events.append(f"{e['name']} rolls {total} against DC {dc} and shakes off '{c}'.")
+                    continue
+                events.append(f"{e['name']} rolls {total} against DC {dc} and is still {c}.")
+        if info.get("rounds"):
+            info["rounds"] -= 1
+            if info["rounds"] <= 0:
+                _drop_condition(e, c)
+                events.append(f"'{c}' ends on {e['name']}.")
+    if events:
+        _put(campaign, "entity", e["id"], e)
+    return events
+
+
+def _expire_timed_conditions(campaign: str) -> list[str]:
+    """Outside a fight, anything counted in rounds is over within a minute."""
+    ended = []
+    for id, e in _all(campaign, "entity").items():
+        timed = [c for c, i in e.get("condition_info", {}).items() if i.get("rounds")]
+        for c in timed:
+            _drop_condition(e, c)
+            ended.append(f"'{c}' ends on {e['name']}.")
+        if timed:
+            _put(campaign, "entity", id, e)
+    return ended
+
+
+def _adjacent(campaign: str, a: dict, t: dict) -> bool | None:
+    """True if the two stand within 5 ft on the battle map, None if the map does not say."""
+    s = _get(campaign, "combat", "combat")
+    m = _get(campaign, "map", "map")
+    if not s or not s.get("active") or not m:
+        return None
+    pa, pt = m["positions"].get(a["id"]), m["positions"].get(t["id"])
+    if pa is None or pt is None:
+        return None
+    return max(abs(pa[0] - pt[0]), abs(pa[1] - pt[1])) <= 1
+
+
+def _attack_mode(campaign: str, a: dict, t: dict, asked: str = "none") -> tuple[str, list[str], bool, list[str]]:
+    """Work out advantage or disadvantage from conditions. Returns (mode, reasons, auto_crit, notes)."""
+    ca, ct = _conds(a), _conds(t)
+    adv, dis, notes = [], [], []
+    if asked == "advantage":
+        adv.append("as called")
+    if asked == "disadvantage":
+        dis.append("as called")
+    dis += [f"{a['name']} is {c}" for c in sorted(ca & _OWN_ATTACKS_DISADV)]
+    if "invisible" in ca:
+        adv.append(f"{a['name']} is invisible")
+    if "grappled" in ca:
+        src = a.get("condition_info", {}).get("grappled", {}).get("source", "")
+        if src and _slug(src) != t["id"]:
+            dis.append(f"{a['name']} is grappled by {src}")
+        elif not src:
+            notes.append(f"{a['name']} is grappled: disadvantage unless the target is the grappler.")
+    adv += [f"{t['name']} is {c}" for c in sorted(ct & _ATTACKED_WITH_ADV)]
+    if "invisible" in ct:
+        dis.append(f"{t['name']} is invisible")
+    near = _adjacent(campaign, a, t)
+    if "prone" in ct or "unconscious" in ct:
+        if "unconscious" in ct:
+            if near is False:
+                dis.append(f"{t['name']} is down and more than 5 ft away")
+        elif near is True:
+            adv.append(f"{t['name']} is prone and within 5 ft")
+        elif near is False:
+            dis.append(f"{t['name']} is prone and more than 5 ft away")
+        else:
+            notes.append(f"{t['name']} is prone: advantage from within 5 ft, disadvantage from further away.")
+    auto_crit = bool(ct & _CRIT_WHEN_ADJACENT) and near is True
+    if ct & _CRIT_WHEN_ADJACENT and near is None:
+        notes.append(f"{t['name']} is helpless: a hit from within 5 ft is a critical hit.")
+    mode = "advantage" if adv and not dis else "disadvantage" if dis and not adv else "none"
+    return mode, adv + dis, auto_crit, notes
 
 
 def spend_slot(campaign: str, caster: str, level: int) -> dict:
@@ -445,15 +658,27 @@ def creature_attack(campaign: str, attacker: str, target: str, attack_name: str 
         raise GameError(f"{a['name']} is dead or down and cannot attack.")
     if not a["attacks"]:
         raise GameError(f"{a['name']} has no attacks on its sheet. Add them with save_character first.")
+    helpless = sorted(_conds(a) & _NO_ACTIONS)
+    if helpless:
+        raise GameError(f"{a['name']} is {helpless[0]} and cannot act this turn.")
     atk = next((x for x in a["attacks"] if x["name"].lower() == attack_name.lower()), a["attacks"][0])
-    nat, detail = _d20(advantage)
-    total = nat + int(atk.get("to_hit", 0))
-    crit = nat == 20
-    hit = crit or (nat != 1 and total >= t["ac"])
+    mode, why, auto_crit, notes = _attack_mode(campaign, a, t, advantage)
+    nat, detail = _d20(mode)
+    tired = 2 * _exhaustion(a)
+    total = nat + int(atk.get("to_hit", 0)) - tired
+    hit = nat == 20 or (nat != 1 and total >= t["ac"])
+    crit = nat == 20 or (hit and auto_crit)
     out: dict[str, Any] = {
-        "attacker": a["name"], "attack": atk["name"], "roll": f"{detail} + {atk.get('to_hit', 0)} = {total}",
+        "attacker": a["name"], "attack": atk["name"],
+        "roll": f"{detail} + {atk.get('to_hit', 0)}" + (f" - {tired} exhaustion" if tired else "") + f" = {total}",
         "hit": hit, "critical": crit,
     }
+    if why:
+        out["rolled_with"] = f"{mode if mode != 'none' else 'a straight roll (advantage and disadvantage cancel)'}: " + "; ".join(why)
+    if notes:
+        out["check"] = notes
+    if crit and nat != 20:
+        out["critical_because"] = f"{t['name']} is helpless and the attacker is within 5 ft."
     if earlier:
         out["earlier_attack_applied"] = earlier
     if t["kind"] == "pc":
@@ -487,39 +712,79 @@ def player_attack(campaign: str, attacker: str, target: str, attack_total: int,
     crit = natural_roll == 20
     hit = crit or (natural_roll != 1 and attack_total >= t["ac"])
     out: dict[str, Any] = {"attacker": a["name"], "hit": hit, "critical": crit}
+    mode, why, auto_crit, notes = _attack_mode(campaign, a, t)
     if hit:
         out.update(apply_damage(campaign, t["id"], damage, damage_type, a["name"], crit=crit))
         if crit:
             out["note_crit"] = "Natural 20. Make sure the damage the player reported used doubled dice."
+        elif auto_crit:
+            out["note_crit"] = (f"{t['name']} is helpless and within 5 ft, so this hit is a critical. Ask the "
+                                "player to roll the damage dice again and add that with apply_damage.")
     else:
         out["target"] = _public(t)
+    if why and mode != "none":
+        out["should_have_rolled_with"] = f"{mode}: " + "; ".join(why)
+    if notes:
+        out["check"] = notes
     return out
 
 
 def saving_throw(campaign: str, who: str, ability: str, dc: int,
-                 player_total: int | None = None, advantage: str = "none") -> dict:
+                 player_total: int | None = None, advantage: str = "none",
+                 ends_condition: str = "") -> dict:
+    """A saving throw. ends_condition: a condition on this creature that a success removes."""
     e = _entity(campaign, who)
+    ab = ability.lower()[:3]
+
+    def done(out: dict) -> dict:
+        if ends_condition:
+            if out["success"] and _drop_condition(e, ends_condition):
+                _put(campaign, "entity", e["id"], e)
+                out["ended"] = ends_condition
+            elif not out["success"]:
+                out["still"] = ends_condition
+            out["target"] = _public(e)
+        _log(campaign, "save", f"{e['name']} {ability} save DC {dc}: {out.get('total', 'fails')} "
+                               f"{'success' if out['success'] else 'failure'}")
+        return out
+
+    if ab in ("str", "dex") and _conds(e) & _FAILS_STR_DEX:
+        state = sorted(_conds(e) & _FAILS_STR_DEX)[0]
+        return done({"who": e["name"], "dc": dc, "success": False,
+                     "note": f"{e['name']} is {state} and fails this save without a roll."})
+    notes = []
+    if ab == "dex" and "restrained" in _conds(e):
+        if advantage == "none":
+            advantage = "disadvantage"
+        notes.append(f"{e['name']} is restrained: disadvantage on Dexterity saves.")
     if e["kind"] == "pc":
         if player_total is None:
-            raise GameError("Ask the player to roll this save, then call again with player_total.")
-        return {"who": e["name"], "total": player_total, "dc": dc, "success": player_total >= dc}
+            raise GameError("Ask the player to roll this save, then call again with player_total."
+                            + (" " + notes[0] if notes else "")
+                            + (f" Exhaustion: -{2 * _exhaustion(e)} on the roll." if _exhaustion(e) else ""))
+        out = {"who": e["name"], "total": player_total, "dc": dc, "success": player_total >= dc}
+        if notes:
+            out["check"] = notes
+        return done(out)
     nat, detail = _d20(advantage)
-    bonus = int(e.get("saves", {}).get(ability.lower()[:3], 0))
+    bonus = int(e.get("saves", {}).get(ab, 0)) - 2 * _exhaustion(e)
     total = nat + bonus
-    _log(campaign, "save", f"{e['name']} {ability} save DC {dc}: {total}")
-    return {"who": e["name"], "roll": f"{detail} + {bonus} = {total}", "dc": dc, "success": total >= dc}
+    out = {"who": e["name"], "roll": f"{detail} + {bonus} = {total}", "total": total, "dc": dc,
+           "success": total >= dc}
+    if notes:
+        out["check"] = notes
+    return done(out)
 
 
 def death_save(campaign: str, pc: str, natural_roll: int) -> dict:
     e = _entity(campaign, pc)
-    if e["kind"] != "pc" or e["hp"] > 0 or e.get("dead"):
+    if e["kind"] not in ("pc", "ally") or e["hp"] > 0 or e.get("dead") or e.get("stable"):
         raise GameError(f"{e['name']} is not making death saves right now.")
-    d = e["death"]
+    d = e.setdefault("death", {"successes": 0, "failures": 0})
     events = []
     if natural_roll == 20:
         e["hp"], e["death"] = 1, {"successes": 0, "failures": 0}
-        if "unconscious" in e["conditions"]:
-            e["conditions"].remove("unconscious")
+        _drop_condition(e, "unconscious")
         events.append("Natural 20: back on their feet with 1 HP.")
     elif natural_roll == 1:
         d["failures"] += 2
@@ -530,12 +795,13 @@ def death_save(campaign: str, pc: str, natural_roll: int) -> dict:
     if e["hp"] <= 0:
         if d["failures"] >= 3:
             e["dead"] = True
-            events.append("Third failure: the character dies. This is final unless the fiction provides a real way back.")
+            events.append(f"Third failure: {e['name']} dies. This is final unless the fiction provides a real way back.")
         elif d["successes"] >= 3:
             e["stable"] = True
             events.append("Third success: stable at 0 HP, still unconscious.")
     _put(campaign, "entity", e["id"], e)
-    return {"pc": _public(e), "death_saves": e["death"], "events": events}
+    _log(campaign, "death-save", f"{e['name']} rolls {natural_roll}: {e['death']} {' '.join(events)}")
+    return {"pc": _public(e), "roll": natural_roll, "death_saves": e["death"], "events": events}
 
 
 def start_combat(campaign: str, combatants: list[str], player_initiatives: dict[str, int]) -> dict:
@@ -562,26 +828,78 @@ def next_turn(campaign: str) -> dict:
     s = _get(campaign, "combat", "combat")
     if not s or not s["active"]:
         raise GameError("No combat is running. Call start_combat first.")
+    leaving = _entity(campaign, s["order"][s["turn"]]["id"])
+    ended = [] if leaving.get("dead") else _end_of_turn(campaign, leaving)
     for _ in range(len(s["order"]) + 1):
         s["turn"] += 1
         if s["turn"] >= len(s["order"]):
             s["turn"], s["round"] = 0, s["round"] + 1
         e = _entity(campaign, s["order"][s["turn"]]["id"])
-        if not e.get("dead") and (e["hp"] > 0 or e["kind"] == "pc"):
+        if e.get("dead"):
+            continue
+        if e["hp"] > 0 or e["kind"] == "pc" or (e["kind"] == "ally" and not e.get("stable")):
             break
     _put(campaign, "combat", "combat", s)
-    out = {"round": s["round"], "now_acting": _public(e)}
+    out: dict[str, Any] = {"round": s["round"], "now_acting": _public(e)}
+    if ended:
+        out["end_of_last_turn"] = ended
+    if e["conditions"]:
+        out["conditions_now"] = [_condition_line(e, c) for c in e["conditions"]]
+    cannot = sorted(_conds(e) & _NO_ACTIONS)
     if e["kind"] == "pc":
         out.update(battle_map(campaign))
         out["draw_grid"] = ("It is the player's turn. First report every turn taken since their last one, a "
                             "line each. Then show the battle grid as map.how_to_show says. Then ask what they do.")
+        notes = _turn_notes(campaign, e, s)
+        if notes:
+            out["tell_player_before_they_roll"] = notes
     if e["kind"] == "pc" and e["hp"] <= 0 and not e.get("stable"):
         out["instruction"] = "The player rolls a death save now. Call death_save with the natural roll."
-    elif e["kind"] != "pc":
+    elif e["kind"] == "pc" and cannot and e["hp"] > 0:
+        out["instruction"] = (f"The character is {cannot[0]} and cannot act. Say so, describe what they "
+                              "perceive, then call next_turn. Any save to end it comes at the end of this turn.")
+    elif e["kind"] == "ally" and e["hp"] <= 0:
+        out["death_save"] = death_save(campaign, e["id"], _rng.randint(1, 20))
+        out["now_acting"] = out["death_save"]["pc"]
+        out["instruction"] = ("This companion is dying. The engine has rolled their death save: report it in "
+                              "one line, exactly, then call next_turn.")
+    elif e["kind"] != "pc" and cannot:
+        out["instruction"] = (f"{e['name']} is {cannot[0]} and loses this turn. One line, then call next_turn.")
+    elif e["kind"] == "ally":
+        out["attacks_available"] = [a["name"] for a in e["attacks"]]
+        out["instruction"] = ("This is a companion, and you play them. Load their card if you have not. They act "
+                              "on what they want and fear, not on what is best for the player, and they do not "
+                              "wait to be told. Resolve attacks with creature_attack. One line of narration.")
+    else:
         out["attacks_available"] = [a["name"] for a in e["attacks"]]
         out["instruction"] = ("Decide what this creature does from its own goals, then resolve attacks with "
                               "creature_attack. Enemies fight to win and target whoever it makes sense to target.")
     return out
+
+
+def _turn_notes(campaign: str, pc: dict, s: dict) -> list[str]:
+    """What the player needs to know before rolling this turn: how conditions change their dice."""
+    notes = []
+    mine = _conds(pc)
+    for c in sorted(mine & _OWN_ATTACKS_DISADV):
+        notes.append(f"{pc['name']} is {c}: disadvantage on attack rolls"
+                     + (" and ability checks." if c in ("poisoned", "frightened") else "."))
+    if "invisible" in mine:
+        notes.append(f"{pc['name']} is invisible: advantage on attack rolls.")
+    if _exhaustion(pc):
+        notes.append(f"Exhaustion {_exhaustion(pc)}: -{2 * _exhaustion(pc)} on every d20 roll.")
+    for o in s["order"]:
+        t = _entity(campaign, o["id"])
+        if t["id"] == pc["id"] or t.get("dead") or t["hp"] <= 0:
+            continue
+        mode, why, crit, extra = _attack_mode(campaign, pc, t)
+        theirs = [w for w in why if w.startswith(t["name"])]
+        if theirs and mode != "none":
+            notes.append(f"Attacks on {t['name']} are rolled with {mode} ({'; '.join(theirs)}).")
+        elif theirs:
+            notes.append(f"Attacks on {t['name']}: advantage and disadvantage cancel ({'; '.join(why)}).")
+        notes += [x for x in extra if x.startswith(t["name"])]
+    return notes
 
 
 def end_combat(campaign: str) -> dict:
@@ -949,8 +1267,12 @@ def advance_time(campaign: str, hours: float, reason: str) -> dict:
             fired += _tick(campaign, id, c, n, reason)
         else:
             _put(campaign, "clock", id, c)
-    return {"world_hours": round(m["world_hours"], 1), "consequences": fired,
-            "instruction": _consequence_rule(fired)}
+    out = {"world_hours": round(m["world_hours"], 1), "consequences": fired,
+           "instruction": _consequence_rule(fired)}
+    ended = _expire_timed_conditions(campaign) if hours >= 0.02 else []
+    if ended:
+        out["conditions_ended"] = ended
+    return out
 
 
 def rest(campaign: str, kind: str) -> dict:
@@ -967,7 +1289,12 @@ def rest(campaign: str, kind: str) -> dict:
             e["hp"] = e["max_hp"]
             if "max_slots" in e:
                 e["slots"] = dict(e["max_slots"])
-            e["conditions"] = [c for c in e["conditions"] if c != "unconscious"]
+            tired = _exhaustion(e)
+            e["conditions"], e["condition_info"] = [], {}
+            if tired > 1:
+                e["conditions"].append(f"exhaustion {tired - 1}")
+            e["stable"] = False
+            e["death"] = {"successes": 0, "failures": 0}
             restored.append(e["name"])
         _put(campaign, "entity", id, e)
     out = advance_time(campaign, 8 if kind == "long" else 1, f"{kind} rest")
@@ -976,6 +1303,356 @@ def rest(campaign: str, kind: str) -> dict:
         out["note"] = ("Short rest: features that recharge on a short rest are restored. The player spends "
                        "hit dice and rolls them; record the result with heal.")
     return out
+
+
+# ------------------------------------------------------------ lore shelf
+#
+# Books and notes for a published or home-made setting, kept per setting and shared by every campaign
+# played in it. They live in their own file so game backups stay small.
+
+LORE_PATH = os.path.join(DATA_DIR, "lore.db")
+UPLOAD_DIR = os.path.join(DATA_DIR, "uploads")
+_STOP = set("a an and are as at be but by do for from has have how i in is it its of on or that the their "
+            "there this to was what when where which who whom why will with".split())
+
+
+def _lore_db() -> tuple[sqlite3.Connection, bool]:
+    """Open the shelf. The second value says whether full-text search is available."""
+    con = sqlite3.connect(LORE_PATH)
+    con.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS book (shelf TEXT, slug TEXT, data TEXT, PRIMARY KEY (shelf, slug));
+        CREATE TABLE IF NOT EXISTS ticket (token TEXT PRIMARY KEY, shelf TEXT, expires REAL);
+        """
+    )
+    try:
+        con.execute("CREATE VIRTUAL TABLE IF NOT EXISTS lore USING fts5("
+                    "shelf UNINDEXED, book UNINDEXED, place UNINDEXED, text, tokenize='porter unicode61')")
+        return con, True
+    except sqlite3.OperationalError:
+        con.execute("CREATE TABLE IF NOT EXISTS lore_plain (shelf TEXT, book TEXT, place TEXT, text TEXT)")
+        return con, False
+
+
+def _shelf_name(setting: str) -> str:
+    """'Ravenloft: Barovia' and 'Ravenloft - the Mists' share the shelf 'ravenloft'."""
+    head = re.split(r"\s+[—–-]\s+|[:(,.;]", setting.strip(), maxsplit=1)[0]
+    return _slug(head)[:40]
+
+
+def _shelf_for(name: str) -> str:
+    """Accepts a campaign name or a setting name."""
+    n = _get(name, "setting", "notes") if name else None
+    if n and n.get("setting"):
+        return n.get("shelf") or _shelf_name(n["setting"])
+    shelf = _shelf_name(name or "")
+    if not shelf:
+        raise GameError("Name the campaign or the setting.")
+    return shelf
+
+
+def _tidy(text: str) -> str:
+    text = text.replace("\r", "\n").replace("\x00", "")
+    text = re.sub(r"(\w)-\n(\w)", r"\1\2", text)          # words split across lines
+    text = re.sub(r"[ \t ]+", " ", text)
+    return re.sub(r"\s*\n\s*", "\n", text).strip()
+
+
+def _chunk(parts: list[tuple[str, str]], size: int = 1600, by_section: bool = True) -> list[tuple[str, str]]:
+    """Cut (place, text) parts into passages of about `size` characters, breaking at sentence ends.
+    by_section starts a new passage at each new place (headings); pages of a PDF run together instead."""
+    out, buf, start, last = [], "", "", ""
+
+    def flush() -> None:
+        nonlocal buf
+        if buf.strip():
+            out.append((start if start == last or not last else f"{start} to {last}", buf.strip()))
+        buf = ""
+
+    for place, text in parts:
+        if by_section and buf and place != last:
+            flush()
+        for piece in re.split(r"(?<=[.!?])\s+|\n", _tidy(text)):
+            piece = piece.strip()
+            if not piece:
+                continue
+            while len(piece) > size:                      # a run with no sentence ends: cut it hard
+                if buf:
+                    flush()
+                start = last = place
+                buf = piece[:size]
+                flush()
+                piece = piece[size:]
+            if not buf:
+                start = place
+            if len(buf) + len(piece) > size:
+                flush()
+                start = place
+            buf += (" " if buf else "") + piece
+            last = place
+    flush()
+    return out
+
+
+def _store_book(shelf: str, title: str, parts: list[tuple[str, str]], extra: dict | None = None) -> dict:
+    title = " ".join(title.split())[:120]
+    if not title:
+        raise GameError("The book needs a title.")
+    chunks = _chunk(parts, by_section=not (extra or {}).get("pages"))
+    if not chunks:
+        raise GameError(f"No readable text found in '{title}'.")
+    slug = _slug(title)
+    con, fts = _lore_db()
+    table = "lore" if fts else "lore_plain"
+    with con:
+        con.execute(f"DELETE FROM {table} WHERE shelf=? AND book=?", (shelf, title))
+        con.executemany(f"INSERT INTO {table} (shelf, book, place, text) VALUES (?,?,?,?)",
+                        [(shelf, title, place, text) for place, text in chunks])
+        rec = {"shelf": shelf, "title": title, "passages": len(chunks),
+               "characters": sum(len(t) for _, t in chunks), "added": time.strftime("%Y-%m-%d", time.gmtime()),
+               **(extra or {})}
+        con.execute("INSERT OR REPLACE INTO book VALUES (?,?,?)", (shelf, slug, json.dumps(rec)))
+    con.close()
+    return rec
+
+
+def _sections(text: str) -> list[tuple[str, str]]:
+    """Split notes on markdown-style headings so each passage can say where it came from."""
+    parts, place, buf = [], "", []
+    for line in text.splitlines():
+        m = re.match(r"^\s{0,3}#{1,4}\s+(.+?)\s*#*\s*$", line)
+        if m:
+            if buf:
+                parts.append((place, "\n".join(buf)))
+            place, buf = m.group(1)[:80], []
+        else:
+            buf.append(line)
+    if buf:
+        parts.append((place, "\n".join(buf)))
+    return parts
+
+
+def lore_add(setting: str, title: str, text: str) -> dict:
+    """Put notes or a pasted chapter on a setting's shelf. A book with the same title is replaced."""
+    shelf = _shelf_for(setting)
+    parts = _sections(text)
+    rec = _store_book(shelf, title, parts, {"contents": [p for p, _ in parts if p][:60]})
+    return {"saved": rec["title"], "shelf": shelf, "passages": rec["passages"]}
+
+
+def _strip_tags(html: str) -> str:
+    import html as _html
+    html = re.sub(r"(?is)<(script|style)\b.*?</\1>", " ", html)
+    html = re.sub(r"(?i)<(br|/p|/div|/h[1-6]|/li|/tr)\b[^>]*>", "\n", html)
+    return _html.unescape(re.sub(r"<[^>]+>", " ", html))
+
+
+def _outline(reader: Any) -> list[str]:
+    titles: list[str] = []
+
+    def walk(items: Any, depth: int) -> None:
+        for it in items:
+            if isinstance(it, list):
+                if depth < 2:
+                    walk(it, depth + 1)
+            elif getattr(it, "title", None) and len(titles) < 80:
+                titles.append(("  " * depth) + str(it.title).strip()[:80])
+
+    try:
+        walk(reader.outline, 0)
+    except Exception:
+        pass
+    return titles
+
+
+def lore_add_file(shelf: str, filename: str, path: str) -> dict:
+    """Read an uploaded book (PDF, EPUB, Word, text, markdown or HTML) and put it on the shelf."""
+    import zipfile
+    stem, ext = os.path.splitext(os.path.basename(filename))
+    title = re.sub(r"[_\s]+", " ", stem).strip() or "Untitled"
+    ext = ext.lower()
+    extra: dict[str, Any] = {"file": os.path.basename(filename)[:120]}
+    if ext == ".pdf":
+        try:
+            from pypdf import PdfReader
+        except ImportError:
+            raise GameError("This server cannot read PDFs yet (pypdf is not installed).")
+        try:
+            reader = PdfReader(path)
+            if reader.is_encrypted:
+                reader.decrypt("")
+            pages = len(reader.pages)
+        except Exception as ex:
+            raise GameError(f"Could not open '{filename}' as a PDF: {ex}")
+        parts, empty = [], 0
+        for i, page in enumerate(reader.pages, 1):
+            try:
+                text = page.extract_text() or ""
+            except Exception:
+                text = ""
+            if len(text.strip()) < 40:
+                empty += 1
+            else:
+                parts.append((f"p. {i}", text))
+        extra.update({"pages": pages, "pages_without_text": empty, "contents": _outline(reader)})
+        if empty > pages / 2:
+            extra["warning"] = ("Most pages have no text layer, so this looks like a scan. It needs text "
+                                "recognition (OCR) before it can be searched properly.")
+    elif ext in (".txt", ".md", ".markdown"):
+        with open(path, encoding="utf-8", errors="replace") as f:
+            parts = _sections(f.read())
+        extra["contents"] = [p for p, _ in parts if p][:60]
+    elif ext in (".html", ".htm"):
+        with open(path, encoding="utf-8", errors="replace") as f:
+            parts = [("", _strip_tags(f.read()))]
+    elif ext == ".docx":
+        try:
+            with zipfile.ZipFile(path) as z:
+                xml = z.read("word/document.xml").decode("utf-8", "replace")
+        except Exception as ex:
+            raise GameError(f"Could not open '{filename}' as a Word file: {ex}")
+        xml = re.sub(r"</w:p>", "\n", xml)
+        parts = [("", _strip_tags(xml))]
+    elif ext == ".epub":
+        parts = []
+        try:
+            with zipfile.ZipFile(path) as z:
+                for name in sorted(n for n in z.namelist() if n.lower().endswith((".xhtml", ".html", ".htm"))):
+                    raw = z.read(name).decode("utf-8", "replace")
+                    head = re.search(r"(?is)<h[1-3][^>]*>(.*?)</h[1-3]>", raw)
+                    place = " ".join(_strip_tags(head.group(1)).split())[:80] if head else ""
+                    parts.append((place, _strip_tags(raw)))
+        except Exception as ex:
+            raise GameError(f"Could not open '{filename}' as an EPUB: {ex}")
+        extra["contents"] = [p for p, _ in parts if p][:80]
+    else:
+        raise GameError(f"'{ext or filename}' is not a kind of file the shelf can read. Use PDF, EPUB, Word "
+                        "(.docx), text, markdown or HTML.")
+    return _store_book(shelf, title, parts, extra)
+
+
+def _books(shelf: str) -> list[dict]:
+    con, _ = _lore_db()
+    rows = con.execute("SELECT data FROM book WHERE shelf=? ORDER BY slug", (shelf,)).fetchall()
+    con.close()
+    return [json.loads(r[0]) for r in rows]
+
+
+def lore_shelf(name: str) -> dict:
+    """What is on the shelf for a campaign's setting (or a named setting)."""
+    shelf = _shelf_for(name)
+    books = _books(shelf)
+    con, _ = _lore_db()
+    others = sorted({r[0] for r in con.execute("SELECT DISTINCT shelf FROM book")} - {shelf})
+    con.close()
+    out: dict[str, Any] = {"shelf": shelf, "books": [
+        {k: b[k] for k in ("title", "pages", "passages", "added", "contents", "warning") if b.get(k)}
+        for b in books]}
+    if not books:
+        out["note"] = ("Nothing on this shelf. If the player has books or notes for the setting, call "
+                       "lore_upload_link and give them the link, or paste short notes with lore_add.")
+    if others:
+        out["other_shelves"] = others
+    return out
+
+
+def _shelf_summary(campaign: str) -> dict | None:
+    """Short form for briefs: titles only, and how to use them."""
+    try:
+        books = _books(_shelf_for(campaign))
+    except Exception:
+        return None
+    if not books:
+        return None
+    return {"books": [b["title"] for b in books],
+            "use": ("These books are this setting's canon. Look things up with lore_search before you "
+                    "describe or invent anything they might cover. Where the campaign's setting notes "
+                    "differ from a book, the setting notes win. If you have no lore_search tool, call "
+                    "open_sealed with the key 'search: ' followed by your words.")}
+
+
+def lore_search(name: str, query: str, book: str = "", limit: int = 5) -> dict:
+    """Search the setting's books. name: the campaign (or a setting). Returns the best-matching passages."""
+    shelf = _shelf_for(name)
+    books = _books(shelf)
+    if not books:
+        raise GameError(f"There are no books on the '{shelf}' shelf. See lore_shelf.")
+    title = ""
+    if book:
+        title = next((b["title"] for b in books if _slug(book) in _slug(b["title"])), "")
+        if not title:
+            raise GameError(f"No book like '{book}' here. On the shelf: {', '.join(b['title'] for b in books)}.")
+    words = [w for w in re.findall(r"[^\W_]{2,}", query.replace("'", "").lower()) if w not in _STOP]
+    if not words:
+        raise GameError("Give a few distinctive words to search for: a name, a place, a thing.")
+    limit = max(1, min(int(limit), 8))
+    con, fts = _lore_db()
+    if fts:
+        terms = [f'"{w}"' for w in words]
+        if len(words) > 1:
+            terms.insert(0, '"' + " ".join(words) + '"')        # the exact phrase scores on top
+        sql = "SELECT book, place, text FROM lore WHERE lore MATCH ? AND shelf=?"
+        args: list[Any] = [" OR ".join(terms), shelf]
+        if title:
+            sql += " AND book=?"
+            args.append(title)
+        rows = con.execute(sql + " ORDER BY bm25(lore) LIMIT ?", args + [limit]).fetchall()
+    else:
+        sql = "SELECT book, place, text FROM lore_plain WHERE shelf=?" + (" AND book=?" if title else "")
+        found = con.execute(sql, [shelf] + ([title] if title else [])).fetchall()
+        scored = [(sum(r[2].lower().count(w) for w in words), r) for r in found]
+        rows = [r for n, r in sorted(scored, key=lambda x: -x[0]) if n][:limit]
+    con.close()
+    out: dict[str, Any] = {"shelf": shelf, "query": query, "results": [
+        {"book": b, "where": place, "text": text[:1700]} for b, place, text in rows]}
+    if rows:
+        out["how_to_use"] = ("Reference for you, not text for the player. Say what the character would know or "
+                             "can find out, in your own words; never paste or closely paraphrase a passage. "
+                             "Books hold secrets the character has not earned: keep those back. Setting notes "
+                             "win over the books where they differ.")
+    else:
+        out["note"] = ("Nothing on the shelf matches. Try a name or a different word. If the books do not "
+                       "cover it, decide it yourself in keeping with what they do say.")
+    return out
+
+
+def lore_remove(setting: str, title: str) -> dict:
+    shelf = _shelf_for(setting)
+    hit = next((b for b in _books(shelf) if _slug(title) == _slug(b["title"])), None)
+    if not hit:
+        raise GameError(f"No book called '{title}' on the '{shelf}' shelf.")
+    con, fts = _lore_db()
+    with con:
+        con.execute(f"DELETE FROM {'lore' if fts else 'lore_plain'} WHERE shelf=? AND book=?", (shelf, hit["title"]))
+        con.execute("DELETE FROM book WHERE shelf=? AND slug=?", (shelf, _slug(hit["title"])))
+    con.close()
+    return {"removed": hit["title"], "shelf": shelf}
+
+
+def lore_upload_link(setting: str) -> dict:
+    """A private, one-hour link to a page where the player can add their own books to a setting's shelf."""
+    shelf = _shelf_for(setting)
+    token = secrets.token_urlsafe(24)
+    con, _ = _lore_db()
+    with con:
+        con.execute("DELETE FROM ticket WHERE expires < ?", (time.time(),))
+        con.execute("INSERT INTO ticket VALUES (?,?,?)", (token, shelf, time.time() + 3600))
+    con.close()
+    base = os.environ.get("PUBLIC_URL", "").rstrip("/")
+    if not base and os.environ.get("RAILWAY_PUBLIC_DOMAIN"):
+        base = "https://" + os.environ["RAILWAY_PUBLIC_DOMAIN"]
+    return {"shelf": shelf, "link": f"{base}/upload/{token}", "valid_for": "one hour",
+            "tell_player": ("Give the player this link exactly. They open it in a browser and drop in their "
+                            "books (PDF, EPUB, Word, text). Anyone with the link can add books for the next "
+                            "hour, so it is for them only. When they say it is done, call lore_shelf to check.")}
+
+
+def upload_ticket(token: str) -> str | None:
+    """The shelf an upload link is good for, or None if the link is unknown or has expired."""
+    con, _ = _lore_db()
+    row = con.execute("SELECT shelf FROM ticket WHERE token=? AND expires>?", (token, time.time())).fetchone()
+    con.close()
+    return row[0] if row else None
 
 
 # ------------------------------------------------------ sealed campaign
@@ -992,6 +1669,10 @@ def sealed_index(campaign: str) -> dict:
 
 
 def open_sealed(campaign: str, key: str) -> dict:
+    if key.lower().startswith("search:"):        # for chats that do not have lore_search yet
+        return lore_search(campaign, key[7:])
+    if key.lower().strip() == "shelf":
+        return lore_shelf(campaign)
     s = _get(campaign, "sealed", _slug(key))
     if s is None:
         raise GameError(f"No sealed entry '{key}'. Call sealed_index to see the keys.")
@@ -1019,6 +1700,7 @@ def author_brief(campaign: str) -> dict:
         "procedure": AUTHOR,
         "setting_notes": _get(campaign, "setting", "notes") or "None saved yet.",
         "established_in_this_setting": _established(campaign),
+        "lore_shelf": _shelf_summary(campaign) or "No books on this setting's shelf.",
         "party": [e for e in ents.values() if e["kind"] in ("pc", "ally")],
         "creatures_on_file": [e["name"] for e in ents.values() if e["kind"] in ("npc", "creature")],
         "cast": list(_all(campaign, "card").values()),
@@ -1140,7 +1822,7 @@ def create_campaign(campaign: str, setting: str, description: str = "", tone: st
             out["character"] = (f"No saved character called '{character}'. Ask the player for the sheet and "
                                 "save it with save_character before running the Author.")
         else:
-            e = {k: v for k, v in src.items() if k not in ("_from", "dead", "stable")}
+            e = {k: v for k, v in src.items() if k not in ("_from", "dead", "stable", "condition_info", "concentrating")}
             e.update({"hp": e["max_hp"], "temp_hp": 0, "conditions": [],
                       "death": {"successes": 0, "failures": 0}})
             if "max_slots" in e:
@@ -1151,6 +1833,10 @@ def create_campaign(campaign: str, setting: str, description: str = "", tone: st
             out["character"] = f"{e['name']} copied from '{src['_from']}', fully rested."
     else:
         out["character"] = "None yet. Save the player character with save_character before running the Author."
+    shelf = _shelf_summary(name)
+    out["lore_shelf"] = shelf["books"] if shelf else (
+        "No books on this setting's shelf. If the player has said they own books or notes for it, call "
+        "lore_upload_link and give them the link before running the Author.")
     out["next"] = f"Call author_brief('{name}') and follow its procedure. Reveal nothing."
     return out
 
@@ -1221,6 +1907,7 @@ def session_start(campaign: str) -> dict:
                    "use_resource and spell slots with spend_slot."),
         "common_knowledge": ck["content"] if ck else None,
         "lore_briefs": [v["key"] for v in _all(campaign, "sealed").values() if v["key"].startswith("lore-")],
+        "lore_shelf": _shelf_summary(campaign) or "No books on this setting's shelf.",
         "setting_notes": _get(campaign, "setting", "notes")
         or "None saved. Ask the player what this game should feel like, then call set_setting_notes.",
         "danger_directive": danger,

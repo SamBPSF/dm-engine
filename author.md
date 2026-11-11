@@ -18,6 +18,15 @@ campaigns in the same world: reuse those names for the same things (the metal, t
 neighbouring land, the church) so the world stays one world. The description wins over them if they
 disagree. This adventure's situation, cast and places are new.
 
+**Books on the shelf.** If `lore_shelf` in the brief lists books, this is a published or written setting
+and the books are canon too, below the setting description and above anything you invent. Before you
+write the premise, read up with lore_search: the region the adventure happens in, who rules it, the
+factions, the creatures that belong there, the customs. Search again for every published name you
+mean to use. Use the setting's own people, places and monsters where they fit, and put new inventions
+in the gaps the books leave. Do not re-run the plot of a published adventure unless the setting notes
+ask for that adventure by name. The books contain secrets: what the character would not know stays in
+sealed entries, never in `common-knowledge` or the lore briefs. Write those in your own words.
+
 The setting notes in the brief describe the world, its tone, the table rules and how long the
 adventure should be. If the description is only a feel or a genre, invent the world yourself: its
 places, powers and history. Put what the character would know of it into `common-knowledge` and the
@@ -67,6 +76,12 @@ other way:
    cannot protect themselves (vary who: not a child by default), and someone who is simply in the way. Give each a voice a reader could hear and one line only
    they would say.
 
+   **Companions.** Anyone who travels and fights beside the character is saved twice: a card (want,
+   fear, voice, what they will not do even if asked, a secret or a loyalty that could pull them away)
+   and a sheet with save_character, kind `ally`, with hit points, armour class, saves and full attack
+   lines, so the engine can run their turns. One or two companions is right for a solo game, weaker
+   than the character. They can die, and the adventure must survive it.
+
 5. **Secrets and clues** (key `secrets`). Eight to ten true things the player could discover. Do not tie
    them to places. For each one the story depends on, list three different ways it could be learned.
    For each of those, also write its **groundwork**: what the player must already understand for the
@@ -86,7 +101,9 @@ other way:
    run encounter_check on each fight and adjust until the rating fits: the opening fight "fair" or
    "dangerous", the main set piece "dangerous", nothing "trivial" or "light", and "deadly" only where
    there is a real way out. Give enemies damage that matters against the character's hit points: a hit
-   should usually cost a tenth of them or more.
+   should usually cost a tenth of them or more. Where an attack or a place can impose a condition
+   (poisoned, grappled, frightened, restrained), write it in the attack's `rider` with the save that
+   resists it and how it ends: a number of rounds, or a save repeated each turn with its DC.
 
 8. **Two hard choices** (key `dilemmas`). Situations with no clean answer, where each option costs
    something the player has come to value.
@@ -126,6 +143,8 @@ entry with the session it is most likely needed in.
 ## Before you finish, check
 
 - Read the setting description once more, line by line. Does anything you wrote contradict it?
+- If there are books on the shelf, did you look up every published name, place and creature you used?
+- Does every companion have both a card and a sheet with attacks?
 - Could a reader describe the villain's voice and want after one meeting?
 - Is there a moment in the first session where the character can be hurt, by something that will
   actually strike? Is any threat in the opening one that its holders would not carry out? Rewrite it.

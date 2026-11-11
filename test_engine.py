@@ -388,4 +388,139 @@ assert g.get_entity(CE, "Vilik")["max_hp"] == 73
 g.archive_campaign(CE, False)
 assert CE in [c["campaign"] for c in g.list_campaigns()["campaigns"]]
 
+# conditions: effects on the engine's own rolls, durations, repeated saves
+CC = "conds"
+g.upsert_entity(CC, "Vilik", "pc", {"max_hp": 60, "ac": 15})
+g.upsert_entity(CC, "Tamsin", "ally", {"max_hp": 12, "ac": 13, "saves": {"wis": 2},
+                                       "attacks": [{"name": "Bow", "to_hit": 5, "damage": "1d8+3", "type": "piercing"}]})
+g.upsert_entity(CC, "Brute", "creature", {"max_hp": 400, "ac": 12, "saves": {"wis": -5, "con": 30},
+                                           "attacks": [{"name": "Maul", "to_hit": 5, "damage": "1d4", "type": "bludgeoning"}]})
+c = g.set_condition(CC, "Brute", "Poisoned", True, rounds=2)
+assert c["rounds_left"] == 2 and "Disadvantage" in c["rule"]
+out = g.creature_attack(CC, "Brute", "Vilik")
+assert "disadvantage" in out["rolled_with"] and "Brute is poisoned" in out["rolled_with"]
+g.set_condition(CC, "Vilik", "restrained", True)
+out = g.creature_attack(CC, "Brute", "Vilik")
+assert out["rolled_with"].startswith("a straight roll")       # advantage and disadvantage cancel
+g.set_condition(CC, "Vilik", "restrained", False)
+assert g.get_entity(CC, "Vilik")["conditions"] == []
+c = g.set_condition(CC, "Vilik", "frightened, save wis 14", True, source="Brute")   # duration in the name
+assert c["condition"] == "frightened" and "DC 14" in c["ends_on"]
+assert g.set_condition(CC, "Tamsin", "blinded for 1 round", True)["rounds_left"] == 1
+g.set_condition(CC, "Brute", "stunned", True, save_ability="con", save_dc=5)
+try:
+    g.creature_attack(CC, "Brute", "Vilik")
+    raise AssertionError("a stunned creature attacked")
+except g.GameError:
+    pass
+assert not g.saving_throw(CC, "Brute", "dex", 1)["success"]       # stunned: fails without a roll
+g.start_combat(CC, ["Vilik", "Brute", "Tamsin"], {"Vilik": 30})
+g.set_battle_map(CC, 8, 6, [], {"Vilik": [1, 1], "Brute": [2, 1], "Tamsin": [6, 4]})
+t = g.next_turn(CC)                                                # Vilik's turn ends: asked for the save
+assert any("ends_condition 'frightened'" in x for x in t["end_of_last_turn"])
+assert not g.saving_throw(CC, "Vilik", "wis", 14, player_total=9, ends_condition="frightened")["success"]
+r = g.saving_throw(CC, "Vilik", "wis", 14, player_total=15, ends_condition="frightened")
+assert r["ended"] == "frightened" and r["target"]["conditions"] == []
+order = [o["name"] for o in g._get(CC, "combat", "combat")["order"]]
+seen = {}
+for _ in range(2):
+    seen[t["now_acting"]["name"]] = t
+    t = g.next_turn(CC)
+assert "loses this turn" in seen["Brute"]["instruction"] and "companion" in seen["Tamsin"]["instruction"]
+assert t["now_acting"]["name"] == "Vilik" and t["round"] == 2
+b = g.get_entity(CC, "Brute")
+assert "stunned" not in b["conditions"]                            # +30 to the save: shaken off
+assert b["condition_info"]["poisoned"]["rounds"] == 1              # one of two rounds used
+assert "blinded" not in g.get_entity(CC, "Tamsin")["conditions"]   # one round, gone
+g.set_condition(CC, "Brute", "prone", True)
+g.set_condition(CC, "Vilik", "poisoned", True, rounds=5)
+for _ in range(3):
+    t = g.next_turn(CC)
+notes = " ".join(t["tell_player_before_they_roll"])
+assert "Vilik is poisoned" in notes and "Brute" in notes and "cancel" in notes
+g.move_token(CC, "Brute", 7, 5)
+out = g.player_attack(CC, "Vilik", "Brute", 20, 12, 5)
+assert "disadvantage" in out["should_have_rolled_with"]            # prone and far, and poisoned
+
+# companions go down, roll death saves on their own turns, and can be lost or saved
+d = g.apply_damage(CC, "Tamsin", 12, "slashing")
+assert d["target"]["status"] == "down and dying" and not g.get_entity(CC, "Tamsin").get("dead")
+g.set_condition(CC, "Brute", "prone", False)
+g.move_token(CC, "Brute", 6, 5)
+hit = None
+for _ in range(80):                                                # helpless and adjacent: any hit is a critical
+    g.heal(CC, "Tamsin", 1); g.apply_damage(CC, "Tamsin", 1)
+    out = g.creature_attack(CC, "Brute", "Tamsin")
+    if out["hit"]:
+        hit = out
+        break
+assert hit and hit["critical"] and "advantage" in hit["rolled_with"]
+assert g.get_entity(CC, "Tamsin")["death"]["failures"] == 2        # a critical on the downed: two failures
+g.heal(CC, "Tamsin", 5)
+assert g.get_entity(CC, "Tamsin")["conditions"] == [] and g.get_entity(CC, "Tamsin")["death"]["failures"] == 0
+g.apply_damage(CC, "Tamsin", 5)
+fate = None
+for _ in range(40):
+    t = g.next_turn(CC)
+    if t["now_acting"]["name"] == "Tamsin" and "death_save" in t:
+        fate = t
+    e = g.get_entity(CC, "Tamsin")
+    if e.get("dead") or e.get("stable") or e["hp"] > 0:
+        break
+e = g.get_entity(CC, "Tamsin")
+assert fate and (e.get("dead") or e.get("stable") or e["hp"] == 1)
+end = g.end_combat(CC)
+assert any("poisoned" in x for x in end.get("conditions_ended", []))   # round-counted conditions end with the fight
+g.set_condition(CC, "Vilik", "exhaustion 3", True)
+g.rest(CC, "long")
+assert g.get_entity(CC, "Vilik")["conditions"] == ["exhaustion 2"]
+
+# lore shelf: books per setting, shared by every campaign in it
+g.set_setting_notes(CC, "Ravenloft: the Mists", "gothic horror")
+assert g._shelf_for(CC) == "ravenloft" and g._shelf_for("Ravenloft - Barovia") == "ravenloft"
+assert "No books" in g.session_start(CC)["lore_shelf"]
+notes = """# Barovia
+The village of Barovia lies under the castle. Its burgomaster died three days ago and lies unburied.
+
+# The Vistani
+The Vistani travel in painted wagons and can leave through the mists at will. Madam Eva reads fortunes
+from the Tarokka deck at the Tser Pool encampment.
+""" + "\n".join(f"Filler sentence number {i} about nothing in particular." for i in range(200))
+r = g.lore_add("Ravenloft", "House Notes", notes)
+assert r["shelf"] == "ravenloft" and r["passages"] >= 3
+hits = g.lore_search(CC, "Who is Madam Eva and what is the Tarokka deck?")
+assert hits["results"][0]["where"] == "The Vistani" and "fortunes" in hits["results"][0]["text"]
+assert g.open_sealed(CC, "search: burgomaster")["results"][0]["where"] == "Barovia"
+assert g.lore_search(CC, "zeppelin")["results"] == [] 
+assert g.session_start(CC)["lore_shelf"]["books"] == ["House Notes"]
+assert g.author_brief(CC)["lore_shelf"]["books"] == ["House Notes"]
+import pathlib, zipfile
+tmp = pathlib.Path(os.environ["DATA_DIR"])
+(tmp / "Van_Richtens_Guide.md").write_text("# Darklords\nEach domain is the prison of its darklord, who cannot leave.")
+rec = g.lore_add_file("ravenloft", "Van_Richtens_Guide.md", str(tmp / "Van_Richtens_Guide.md"))
+assert rec["title"] == "Van Richtens Guide" and rec["contents"] == ["Darklords"]
+with zipfile.ZipFile(tmp / "gaz.docx", "w") as z:
+    z.writestr("word/document.xml", "<w:document><w:p><w:r><w:t>Krezk has an abbey of Saint Markovia.</w:t></w:r></w:p></w:document>")
+g.lore_add_file("ravenloft", "gaz.docx", str(tmp / "gaz.docx"))
+assert g.lore_search("ravenloft", "abbey", book="gaz")["results"][0]["book"] == "gaz"
+try:
+    from pypdf import PdfWriter
+    w = PdfWriter(); w.add_blank_page(width=200, height=200)
+    with open(tmp / "scan.pdf", "wb") as f:
+        w.write(f)
+    try:
+        g.lore_add_file("ravenloft", "scan.pdf", str(tmp / "scan.pdf"))
+        raise AssertionError("a PDF with no text was accepted")
+    except g.GameError:
+        pass
+except ImportError:
+    pass
+assert len(g.lore_shelf(CC)["books"]) == 3
+g.lore_remove("Ravenloft", "gaz")
+assert len(g.lore_shelf(CC)["books"]) == 2 and g.lore_search(CC, "abbey")["results"] == []
+link = g.lore_upload_link(CC)
+token = link["link"].rsplit("/", 1)[1]
+assert link["shelf"] == "ravenloft" and g.upload_ticket(token) == "ravenloft" and g.upload_ticket("nope") is None
+assert "~lore" not in g._campaign_names(include_hidden=True)
+
 print("all engine checks passed")

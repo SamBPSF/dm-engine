@@ -2,6 +2,7 @@
 
 Environment variables:
   DM_KEY    required secret. Requests must send it in an x-api-key header (or "Authorization: Bearer <key>").
+  PUBLIC_URL  optional. The server's own address, used in book-upload links. On Railway it is found by itself.
   DATA_DIR  where the game database lives (mount a Railway volume here, e.g. /data).
   PORT      set by the host.
 """
@@ -9,11 +10,15 @@ from __future__ import annotations
 
 import hmac
 import os
+import secrets
+from urllib.parse import unquote
 
 import uvicorn
 from mcp.server.mcpserver import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
-from starlette.responses import FileResponse, JSONResponse, PlainTextResponse
+from anyio import to_thread
+from starlette.requests import Request
+from starlette.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
 
 import engine
 
@@ -30,6 +35,14 @@ INSTRUCTIONS = """You are the Narrator for a solo D&D 5e game. This engine is th
 - The character sheet is on the engine. Look up bonuses, spells and features with get_character; do not
   ask the player for them. Spend limited-use features with use_resource.
 - When anyone casts a concentration spell, call concentrate; the engine then asks for the save on damage.
+- Record every condition with set_condition, with how it ends (rounds, or a repeated save). The engine
+  then applies advantage and disadvantage to the attacks it rolls, counts the rounds down and tells you,
+  at the start of the player's turn, how conditions change their rolls. Say that before they roll.
+- Companions are yours to play. On their turn they act from their own card without being asked. At 0 hit
+  points they are dying, not dead: the engine rolls their death saves and they can be saved or lost.
+- If session_start lists books on the lore shelf, they are the setting's canon. Use lore_search before
+  describing a place, person, creature or piece of history they might cover. Tell it in your own words,
+  as what the character knows; never paste passages, and keep back what the character has not learned.
 - Never track hit points, slots or initiative yourself. The engine's numbers are the truth.
 - Time passing lets villains act. Call advance_time or rest whenever hours pass, and show the consequences.
 - In every fight, call set_battle_map when combat starts and move_token whenever anyone moves. Squares
@@ -201,14 +214,16 @@ def heal(campaign: str, target: str, amount: int) -> dict:
 
 @mcp.tool()
 def saving_throw(campaign: str, who: str, ability: str, dc: int, player_total: int | None = None,
-                 advantage: str = "none") -> dict:
-    """A saving throw. For the player character pass player_total; for anyone else the engine rolls."""
-    return _run(engine.saving_throw, campaign, who, ability, dc, player_total, advantage)
+                 advantage: str = "none", ends_condition: str = "") -> dict:
+    """A saving throw. For the player character pass player_total; for anyone else the engine rolls.
+    ends_condition: a condition on this creature that a success removes."""
+    return _run(engine.saving_throw, campaign, who, ability, dc, player_total, advantage, ends_condition)
 
 
 @mcp.tool()
 def death_save(campaign: str, pc: str, natural_roll: int) -> dict:
-    """Record the player's death saving throw (the number on the d20)."""
+    """Record the player's death saving throw (the number on the d20). A dying companion's saves are
+    rolled by the engine on their turn; out of combat, roll one for them here with a d20 from roll."""
     return _run(engine.death_save, campaign, pc, natural_roll)
 
 
@@ -283,9 +298,13 @@ def archive_campaign(campaign: str, archived: bool = True) -> dict:
 
 
 @mcp.tool()
-def set_condition(campaign: str, target: str, condition: str, active: bool) -> dict:
-    """Add or remove a condition such as poisoned, prone, frightened."""
-    return _run(engine.set_condition, campaign, target, condition, active)
+def set_condition(campaign: str, target: str, condition: str, active: bool, rounds: int = 0,
+                  save_ability: str = "", save_dc: int = 0, source: str = "") -> dict:
+    """Add or remove a condition such as poisoned, prone, frightened, restrained, 'exhaustion 2'.
+    rounds: it ends by itself after that many of the target's turns. save_ability and save_dc: the target
+    repeats that save at the end of each of its turns and a success ends it. source: who caused it.
+    The engine applies the condition's effect to attacks and saves it rolls, and counts it down."""
+    return _run(engine.set_condition, campaign, target, condition, active, rounds, save_ability, save_dc, source)
 
 
 @mcp.tool()
@@ -327,6 +346,39 @@ def set_setting_notes(campaign: str, setting: str, tone: str, table_rules: list[
     """Save this campaign's setting name, tone, house rules and a description of the world. They apply
     on top of the playbook and win where the two disagree."""
     return _run(engine.set_setting_notes, campaign, setting, tone, table_rules, description)
+
+
+@mcp.tool()
+def lore_search(campaign: str, query: str, book: str = "", limit: int = 5) -> dict:
+    """Search the books on this campaign's setting shelf (campaign may also be a setting name). query: a
+    few distinctive words, such as a name or place. book: limit the search to one title. Returns
+    passages for your reference: tell the player what their character would know, in your own words."""
+    return _run(engine.lore_search, campaign, query, book, limit)
+
+
+@mcp.tool()
+def lore_shelf(campaign: str) -> dict:
+    """List the books and notes on a campaign's setting shelf, with their contents where known."""
+    return _run(engine.lore_shelf, campaign)
+
+
+@mcp.tool()
+def lore_upload_link(setting: str) -> dict:
+    """Get a private one-hour link the player opens in a browser to add their own books (PDF, EPUB, Word,
+    text) to a setting's shelf. Use when the player wants to play in a setting they have books for."""
+    return _run(engine.lore_upload_link, setting)
+
+
+@mcp.tool()
+def lore_add(setting: str, title: str, text: str) -> dict:
+    """Put pasted notes or a short chapter on a setting's shelf. Replaces a book with the same title."""
+    return _run(engine.lore_add, setting, title, text)
+
+
+@mcp.tool()
+def lore_remove(setting: str, title: str) -> dict:
+    """Take a book off a setting's shelf. Only when the player asks."""
+    return _run(engine.lore_remove, setting, title)
 
 
 @mcp.tool()
@@ -389,6 +441,94 @@ app = mcp.streamable_http_app(
 )
 
 
+MAX_UPLOAD = 300 * 1024 * 1024
+
+UPLOAD_PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>Add books</title>
+<style>
+:root{--bg:#f6f4ee;--fg:#22211e;--mute:#6b6962;--line:#cfccc2;--card:#fff;--ok:#2f6b1f;--bad:#a23a1b;--accent:#0c5b4b}
+@media (prefers-color-scheme:dark){:root{--bg:#1b1a18;--fg:#eceae3;--mute:#a3a096;--line:#45433d;--card:#252421;--ok:#9fd08a;--bad:#f0a58c;--accent:#8fd9c6}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.5 system-ui,sans-serif}
+main{max-width:640px;margin:0 auto;padding:32px 16px}h1{font-size:24px;margin:0 0 4px}p{color:var(--mute);margin:0 0 16px}
+#drop{border:2px dashed var(--line);border-radius:12px;background:var(--card);padding:40px 16px;text-align:center;cursor:pointer}
+#drop.over{border-color:var(--accent)}#drop b{color:var(--accent)}
+ul{list-style:none;padding:0;margin:20px 0 0}li{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin:0 0 8px}
+li small{display:block;color:var(--mute)}li.ok small{color:var(--ok)}li.bad small{color:var(--bad)}
+h2{font-size:15px;margin:28px 0 8px;color:var(--mute);font-weight:600}
+</style></head><body><main>
+<h1>Add books to the __SHELF__ shelf</h1>
+<p>PDF, EPUB, Word, text or markdown. Each book is read into a private search index on your game server so the
+DM can look things up. A book with the same file name replaces the earlier copy. This page stops working an
+hour after the link was made.</p>
+<div id="drop" tabindex="0"><b>Choose files</b> or drop them here</div>
+<input id="pick" type="file" multiple hidden accept=".pdf,.epub,.docx,.txt,.md,.markdown,.html,.htm">
+<ul id="list"></ul>
+<h2>Already on the shelf</h2><ul id="have">__HAVE__</ul>
+</main><script>
+const drop=document.getElementById('drop'),pick=document.getElementById('pick'),list=document.getElementById('list');
+let queue=Promise.resolve();
+function row(name){const li=document.createElement('li');const t=document.createElement('span');t.textContent=name;
+const s=document.createElement('small');s.textContent='Waiting';li.append(t,s);list.append(li);return {li,s};}
+function send(file){const r=row(file.name);queue=queue.then(async()=>{r.s.textContent='Uploading and reading. A long book can take a few minutes.';
+try{const res=await fetch(location.href,{method:'POST',headers:{'x-filename':encodeURIComponent(file.name)},body:file});
+const j=await res.json();if(!res.ok||j.error){r.li.className='bad';r.s.textContent=j.error||('Failed ('+res.status+')');return;}
+r.li.className=j.warning?'bad':'ok';r.s.textContent='Added: '+j.passages+' passages'+(j.pages?' from '+j.pages+' pages':'')+(j.warning?'. '+j.warning:'');
+}catch(e){r.li.className='bad';r.s.textContent='Upload failed: '+e.message;}});}
+function take(files){for(const f of files)send(f);}
+drop.onclick=()=>pick.click();drop.onkeydown=e=>{if(e.key==='Enter'||e.key===' ')pick.click();};
+pick.onchange=()=>{take(pick.files);pick.value='';};
+drop.ondragover=e=>{e.preventDefault();drop.classList.add('over');};drop.ondragleave=()=>drop.classList.remove('over');
+drop.ondrop=e=>{e.preventDefault();drop.classList.remove('over');take(e.dataTransfer.files);};
+</script></body></html>"""
+
+
+def _esc(text: str) -> str:
+    return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+async def _upload(scope, receive, send):
+    """The book-upload page behind a one-hour link made by lore_upload_link. The link is the permission."""
+    token = scope["path"].split("/")[2] if scope["path"].count("/") >= 2 else ""
+    shelf = engine.upload_ticket(token)
+    if not shelf:
+        return await PlainTextResponse("This upload link has expired. Ask the DM chat for a new one.",
+                                       status_code=404)(scope, receive, send)
+    if scope["method"] == "GET":
+        have = "".join(f"<li>{_esc(b['title'])}<small>{b['passages']} passages</small></li>"
+                       for b in engine.lore_shelf(shelf)["books"]) or "<li><small>Nothing yet</small></li>"
+        page = UPLOAD_PAGE.replace("__SHELF__", _esc(shelf)).replace("__HAVE__", have)
+        return await HTMLResponse(page, headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer",
+                                                 "X-Robots-Tag": "noindex"})(scope, receive, send)
+    if scope["method"] != "POST":
+        return await JSONResponse({"error": "Use the page to upload."}, status_code=405)(scope, receive, send)
+    request = Request(scope, receive)
+    filename = os.path.basename(unquote(request.headers.get("x-filename", "")).replace("\\", "/"))[:200] or "book.txt"
+    os.makedirs(engine.UPLOAD_DIR, exist_ok=True)
+    path = os.path.join(engine.UPLOAD_DIR, secrets.token_hex(8) + os.path.splitext(filename)[1].lower()[:10])
+    try:
+        size = 0
+        with open(path, "wb") as f:
+            async for chunk in request.stream():
+                size += len(chunk)
+                if size > MAX_UPLOAD:
+                    return await JSONResponse({"error": "That file is over 300 MB. Split it or send a smaller copy."},
+                                              status_code=413)(scope, receive, send)
+                f.write(chunk)
+        if size == 0:
+            return await JSONResponse({"error": "The file arrived empty."}, status_code=400)(scope, receive, send)
+        try:
+            rec = await to_thread.run_sync(engine.lore_add_file, shelf, filename, path)
+        except engine.GameError as e:
+            return await JSONResponse({"error": str(e)}, status_code=400)(scope, receive, send)
+        except Exception as e:  # a bad file must not take the server down
+            return await JSONResponse({"error": f"Could not read that file: {e}"}, status_code=400)(scope, receive, send)
+        return await JSONResponse({k: rec[k] for k in ("title", "passages", "pages", "warning") if rec.get(k)}
+                                  )(scope, receive, send)
+    finally:
+        if os.path.exists(path):
+            os.remove(path)
+
+
 class KeyGate:
     """Reject every request that does not carry the secret key. '/' stays open as a health check."""
 
@@ -400,6 +540,8 @@ class KeyGate:
             return await self.inner(scope, receive, send)
         if scope["path"] in ("/", "/health"):
             return await PlainTextResponse("dm-engine ok")(scope, receive, send)
+        if scope["path"].startswith("/upload/"):
+            return await _upload(scope, receive, send)
         headers = {k.decode().lower(): v.decode() for k, v in scope.get("headers", [])}
         sent = (
             headers.get("x-api-key")

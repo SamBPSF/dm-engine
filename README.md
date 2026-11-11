@@ -6,7 +6,10 @@ narrating chat cannot fudge any of them.
 
 ## Files
 
-- `engine.py`: the rules and saved game state (a SQLite file).
+- `engine.py`: the rules and saved game state (a SQLite file), plus the lore shelf: the player's own
+  setting books, indexed for search in a second file so game backups stay small.
+- `playbook.md`, `author.md`, `reviewer.md`, `setup.md`: the instructions the engine hands to the chat
+  for running play, writing a campaign, reviewing a session and starting a new game.
 - `server.py`: exposes the engine to Claude as tools, locked behind a secret key.
 - `test_engine.py`: rule checks. Run `python test_engine.py`.
 
@@ -25,6 +28,12 @@ narrating chat cannot fudge any of them.
 Add a custom connector with the URL `https://<domain>/mcp` and a request header:
 
     x-api-key: <your DM_KEY>
+
+## Adding setting books
+
+In a chat, ask the DM for a link to add books to a setting. It makes a private page, good for one hour,
+where PDF, EPUB, Word and text files can be dropped in. The files are read into the search index and
+not kept. `https://<domain>/backup` (with the key) downloads a copy of every saved game.
 
 ## Run locally
 

@@ -16,8 +16,11 @@ first, keeping only the last three sessions.
 
 - **Stakes.** Did the player character lose anything: hit points, time, an ally's trust, a chance?
   Was there a moment they could have died or failed for good?
-- **Canon.** Did play or prep contradict the setting description? Note it, and do not deepen the
-  contradiction in what you prepare next.
+- **Canon.** Did play or prep contradict the setting description, or the books on the lore shelf if
+  the brief lists any (check with lore_search)? Note it, and do not deepen the contradiction in what
+  you prepare next.
+- **Companions.** Did each companion act from their own wants at least once, or did they stand about
+  waiting for orders? Did one of them take a decision or a victory that should have been the player's?
 - **Reveals.** Did anything meant to be important fall flat because the player lacked the context to
   see why it mattered? Name it, and plan where the missing groundwork gets laid so it can land later.
 - **Real action.** Was any threat staged but never carried out? Did someone step in to spare the
