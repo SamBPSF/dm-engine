@@ -679,7 +679,7 @@ def set_setting_notes(campaign: str, setting: str, tone: str, table_rules: list[
     """Per-campaign notes that sit on top of the playbook: the setting's name, how it should feel, house rules."""
     prev = _get(campaign, "setting", "notes") or {}
     n = {**prev, "setting": setting, "tone": tone, "table_rules": table_rules or prev.get("table_rules", []),
-         "description": description or prev.get("description", "")}
+         "description": description or prev.get("description", ""), "saved_at": time.time()}
     _put(campaign, "setting", "notes", n)
     return n
 
@@ -711,12 +711,18 @@ def _campaign_names() -> list[str]:
 
 def _saved_settings() -> dict[str, dict]:
     """Settings already described in any campaign, newest campaign winning, keyed by slug."""
-    out: dict[str, dict] = {}
+    found = []
     for c in _campaign_names():
         n = _get(c, "setting", "notes")
         if n and n.get("setting"):
-            out[_slug(n["setting"])] = {**n, "from_campaign": c}
-    return out
+            found.append({**n, "from_campaign": c})
+    found.sort(key=lambda n: n.get("saved_at", 0))
+    return {_slug(n["setting"]): n for n in found}
+
+
+def _latest_table_rules(saved: dict[str, dict]) -> list[str]:
+    with_rules = [n for n in saved.values() if n.get("table_rules")]
+    return max(with_rules, key=lambda n: n.get("saved_at", 0))["table_rules"] if with_rules else []
 
 
 def _saved_characters() -> dict[str, dict]:
@@ -731,7 +737,7 @@ def _saved_characters() -> dict[str, dict]:
 
 def campaign_setup_guide() -> dict:
     settings = _saved_settings()
-    rules = next((n["table_rules"] for n in reversed(list(settings.values())) if n.get("table_rules")), [])
+    rules = _latest_table_rules(settings)
     return {
         "procedure": SETUP,
         "saved_settings": [{"name": n["setting"], "tone": n.get("tone", "")} for n in settings.values()],
@@ -757,13 +763,13 @@ def create_campaign(campaign: str, setting: str, description: str = "", tone: st
                         "the player wants if the Author is to invent it. Saved: "
                         + (", ".join(n["setting"] for n in saved.values()) or "none") + ".")
     if table_rules is None:
-        table_rules = base.get("table_rules") or next(
-            (n["table_rules"] for n in reversed(list(saved.values())) if n.get("table_rules")), [])
+        table_rules = base.get("table_rules") or _latest_table_rules(saved)
     notes = {"setting": setting or base.get("setting", name),
              "description": description or base.get("description", ""),
              "tone": tone or base.get("tone", ""),
              "table_rules": table_rules,
-             "length": length or "A short adventure of two or three sessions."}
+             "length": length or "A short adventure of two or three sessions.",
+             "saved_at": time.time()}
     _put(name, "setting", "notes", notes)
     out: dict[str, Any] = {"campaign": name, "setting_notes": notes}
     if character:
