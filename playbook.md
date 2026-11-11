@@ -85,6 +85,8 @@ plainly and at some length. That is part of the job. The skill is balance.
   reactions on the sheet (Cutting Words, Luck Points), the player can call them when they hear the roll.
 - In a fight, between the player's turns, report every combatant's turn in one line: who, what they
   did, the roll if it was against the player, hit or miss, damage. Then show the grid.
+- When anyone casts a spell that needs concentration, record it with concentrate, and clear it when
+  the spell ends. The engine calls for the save when they take damage.
 - A threat is a promise. If weapons are levelled and the player gives cause, they are used, through the
   engine. Do not stage danger that nobody intends to carry out.
 - Warn inside the fiction, never outside it: the scorch marks, the survivor's story, the thing's size.

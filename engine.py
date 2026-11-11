@@ -82,6 +82,66 @@ def _log(campaign: str, kind: str, text: str) -> None:
         con.execute("INSERT INTO log VALUES (?,?,?,?)", (campaign, time.time(), kind, text))
 
 
+BACKUP_DIR = os.path.join(DATA_DIR, "backups")
+_BACKUP_NAME = re.compile(r"^\d{8}-\d{6}-[a-z0-9-]*\.db$")
+
+
+def snapshot(reason: str = "auto", min_gap_minutes: float = 10) -> str | None:
+    """Copy the whole saved game to the backups folder. Keeps the newest 30 copies."""
+    os.makedirs(BACKUP_DIR, exist_ok=True)
+    have = sorted(f for f in os.listdir(BACKUP_DIR) if _BACKUP_NAME.match(f))
+    if have and min_gap_minutes and time.time() - os.path.getmtime(os.path.join(BACKUP_DIR, have[-1])) < min_gap_minutes * 60:
+        return None
+    name = time.strftime("%Y%m%d-%H%M%S", time.gmtime()) + "-" + _slug(reason)[:24] + ".db"
+    src, dst = _db(), sqlite3.connect(os.path.join(BACKUP_DIR, name))
+    try:
+        src.backup(dst)
+    finally:
+        dst.close()
+        src.close()
+    for old in sorted(f for f in os.listdir(BACKUP_DIR) if _BACKUP_NAME.match(f))[:-30]:
+        os.remove(os.path.join(BACKUP_DIR, old))
+    return name
+
+
+def _safe_snapshot(reason: str) -> None:
+    try:
+        snapshot(reason)
+    except Exception:  # a failed backup must never stop play
+        pass
+
+
+def list_backups() -> dict:
+    os.makedirs(BACKUP_DIR, exist_ok=True)
+    out = []
+    for f in sorted((f for f in os.listdir(BACKUP_DIR) if _BACKUP_NAME.match(f)), reverse=True):
+        out.append({"backup": f, "taken_utc": f"{f[0:4]}-{f[4:6]}-{f[6:8]} {f[9:11]}:{f[11:13]}",
+                    "reason": f[16:-3]})
+    return {"backups": out, "note": "Backups are taken automatically before sessions, prep and reviews."}
+
+
+def restore_campaign(campaign: str, backup: str) -> dict:
+    """Put one campaign back to how it was in a backup. Other campaigns are untouched."""
+    if not _BACKUP_NAME.match(backup) or not os.path.exists(os.path.join(BACKUP_DIR, backup)):
+        raise GameError(f"No backup called '{backup}'. Call list_backups for the names.")
+    old = sqlite3.connect(os.path.join(BACKUP_DIR, backup))
+    try:
+        docs = old.execute("SELECT campaign, kind, id, data FROM doc WHERE campaign=?", (campaign,)).fetchall()
+        logs = old.execute("SELECT campaign, ts, kind, text FROM log WHERE campaign=?", (campaign,)).fetchall()
+    finally:
+        old.close()
+    if not docs:
+        raise GameError(f"That backup holds nothing for campaign '{campaign}'.")
+    kept = snapshot("before-restore", 0)
+    with _db() as con:
+        con.execute("DELETE FROM doc WHERE campaign=?", (campaign,))
+        con.execute("DELETE FROM log WHERE campaign=?", (campaign,))
+        con.executemany("INSERT INTO doc VALUES (?,?,?,?)", docs)
+        con.executemany("INSERT INTO log VALUES (?,?,?,?)", logs)
+    return {"restored": campaign, "from": backup, "entries": len(docs),
+            "undo": f"The state just replaced was saved as '{kept}'."}
+
+
 def _meta(campaign: str) -> dict:
     return _get(campaign, "meta", "meta", {
         "session": 0, "world_hours": 0.0, "last_danger_session": 0,
@@ -212,6 +272,8 @@ def _status(e: dict) -> str:
 
 def _public(e: dict) -> dict:
     out = {"name": e["name"], "kind": e["kind"], "status": _status(e), "conditions": e["conditions"]}
+    if e.get("concentrating"):
+        out["concentrating_on"] = e["concentrating"]
     if e["kind"] in ("pc", "ally"):
         out.update({"hp": e["hp"], "max_hp": e["max_hp"], "temp_hp": e["temp_hp"], "ac": e["ac"]})
         if "slots" in e:
@@ -265,9 +327,39 @@ def apply_damage(campaign: str, target: str, amount: int, damage_type: str = "",
     elif e["hp"] == 0:
         e["dead"] = True
         events.append(f"{e['name']} is killed.")
+    spell = e.get("concentrating")
+    if spell and dealt > 0:
+        dc = max(10, dealt // 2)
+        if e["hp"] == 0:
+            e["concentrating"] = ""
+            events.append(f"Concentration on {spell} ends.")
+        elif e["kind"] == "pc":
+            events.append(f"Concentration on {spell}: the player rolls a Constitution save, DC {dc}. "
+                          + (e.get("save_notes", "") + " " if e.get("save_notes") else "")
+                          + "If it fails, call concentrate with an empty spell.")
+        else:
+            nat, _ = _d20()
+            total = nat + int(e.get("saves", {}).get("con", 0))
+            if total < dc:
+                e["concentrating"] = ""
+                events.append(f"{e['name']} rolls {total} against DC {dc} and loses concentration on {spell}.")
+            else:
+                events.append(f"{e['name']} rolls {total} against DC {dc} and holds concentration on {spell}.")
     _put(campaign, "entity", e["id"], e)
     _log(campaign, "damage", f"{e['name']} takes {dealt} {damage_type} from {source or 'unknown'} -> {e['hp']}/{e['max_hp']}")
     return {"target": _public(e), "damage_dealt": dealt, "note": note, "events": events}
+
+
+def concentrate(campaign: str, who: str, spell: str = "") -> dict:
+    """Record that someone is concentrating on a spell, or (empty spell) that they have stopped."""
+    e = _entity(campaign, who)
+    dropped = e.get("concentrating") or ""
+    e["concentrating"] = spell
+    _put(campaign, "entity", e["id"], e)
+    out = {"who": e["name"], "concentrating_on": spell or None}
+    if dropped and dropped != spell:
+        out["ended"] = dropped
+    return out
 
 
 def heal(campaign: str, target: str, amount: int) -> dict:
@@ -663,6 +755,77 @@ def battle_map(campaign: str) -> dict:
                                     "squares to the player only by these labels, such as E6.")}}
 
 
+# ------------------------------------------------------ encounter check
+
+def _avg(expr: str, dice_only: bool = False) -> float:
+    total = 0.0
+    for sign, n, sides, flat in _TERM.findall(str(expr).replace(" ", "").lower()):
+        mult = -1 if sign == "-" else 1
+        if sides:
+            total += mult * int(n or 1) * (int(sides) + 1) / 2
+        elif not dice_only:
+            total += mult * int(flat)
+    return total
+
+
+def _dpr(e: dict, ac: float) -> float:
+    """Expected damage a round from the best attack on the sheet against a given armour class."""
+    best = 0.0
+    for a in e.get("attacks", []):
+        try:
+            p = min(0.95, max(0.05, (21 - (ac - int(a.get("to_hit", 0)))) / 20))
+            best = max(best, (p * _avg(a["damage"]) + 0.05 * _avg(a["damage"], True)) * int(a.get("count", 1)))
+        except (KeyError, ValueError, TypeError):
+            continue
+    return best * int(e.get("attacks_per_round", 1))
+
+
+def encounter_check(campaign: str, enemies: list[str], allies: list[str] | None = None, pc: str = "") -> dict:
+    """Estimate how dangerous a fight is for the player character, from the sheets on file."""
+    ents = _all(campaign, "entity")
+    hero = _entity(campaign, pc) if pc else next((e for e in ents.values() if e["kind"] == "pc"), None)
+    if hero is None:
+        raise GameError("No player character is saved in this campaign yet.")
+    if not enemies:
+        raise GameError("List the enemies by name, repeating a name for each copy.")
+    foes = [_entity(campaign, n) for n in enemies]
+    friends = [_entity(campaign, n) for n in (allies or [])]
+    foe_ac = sum(f["ac"] for f in foes) / len(foes)
+    foe_hp = sum(f["max_hp"] for f in foes)
+    incoming = sum(_dpr(f, hero["ac"]) for f in foes)
+    outgoing = _dpr(hero, foe_ac) + sum(_dpr(a, foe_ac) for a in friends)
+    rounds_to_win = foe_hp / outgoing if outgoing > 0 else 99.0
+    share = 1.0 if not friends else 0.6
+    # Enemies fall over the course of the fight, so on average about 60% of them are still swinging.
+    loss = incoming * share * min(rounds_to_win, 20) * 0.6
+    pct = loss / hero["max_hp"]
+    rating = ("trivial" if pct < 0.12 else "light" if pct < 0.3 else "fair" if pct < 0.55
+              else "dangerous" if pct < 0.85 else "deadly")
+    advice = {
+        "trivial": "The player will feel no danger. Add enemies, raise their damage, or give them terrain.",
+        "light": "A skirmish. Fine as a side beat, too soft for a set piece.",
+        "fair": "A fight that costs something. Right for most set pieces.",
+        "dangerous": "The character could go down if it is played badly. Right for a main set piece.",
+        "deadly": "The character probably loses a straight fight. Use only with a real way out or a goal "
+                  "other than winning.",
+    }[rating]
+    swings = sum(int(f.get("attacks_per_round", 1)) for f in foes)
+    out = {
+        "rating": rating, "advice": advice,
+        "expected_hp_lost": round(loss), "of_max_hp": hero["max_hp"], "share_of_hp": f"{round(pct * 100)}%",
+        "enemy_damage_per_round_if_all_target_the_character": round(incoming, 1),
+        "rounds_until_character_drops_if_focused": round(hero["max_hp"] / incoming, 1) if incoming else None,
+        "party_damage_per_round": round(outgoing, 1), "rounds_to_defeat_enemies": round(rounds_to_win, 1),
+        "caveat": ("Counts only the attacks written on the sheets. Spells, control effects, terrain, surprise "
+                   "and enemy riders are not counted: a caster with area or control spells is stronger than "
+                   "this, and enemies who grab, net or use hazards are more dangerous than this."),
+    }
+    if swings > 3 + 2 * len(friends):
+        out["warning"] = (f"{swings} enemy attacks a round against {1 + len(friends)} on the player's side. One "
+                          "character cannot answer that many; use fewer, heavier enemies.")
+    return out
+
+
 # ----------------------------------------------------- checks and cards
 
 def set_check(campaign: str, who: str, skill: str, dc: int, on_failure: str, on_success: str = "") -> dict:
@@ -849,6 +1012,7 @@ def set_setting_notes(campaign: str, setting: str, tone: str, table_rules: list[
 
 def author_brief(campaign: str) -> dict:
     """Everything the Author needs: the procedure and the full current state of the campaign."""
+    _safe_snapshot("before-author")
     m = _meta(campaign)
     ents = _all(campaign, "entity")
     return {
@@ -868,9 +1032,24 @@ def author_brief(campaign: str) -> dict:
     }
 
 
-def _campaign_names() -> list[str]:
+def _campaign_names(include_hidden: bool = False) -> list[str]:
+    """Campaign names. Archived campaigns and scratch ones with no setting are hidden unless asked for."""
     with _db() as con:
-        return [r[0] for r in con.execute("SELECT DISTINCT campaign FROM doc ORDER BY campaign")]
+        names = [r[0] for r in con.execute("SELECT DISTINCT campaign FROM doc ORDER BY campaign")]
+    if include_hidden:
+        return names
+    return [c for c in names
+            if not _meta(c).get("archived") and (_get(c, "setting", "notes") or {}).get("setting")]
+
+
+def archive_campaign(campaign: str, archived: bool = True) -> dict:
+    """Hide a campaign from lists and from setup without deleting anything. Reversible."""
+    if campaign not in _campaign_names(include_hidden=True):
+        raise GameError(f"No campaign called '{campaign}'.")
+    m = _meta(campaign)
+    m["archived"] = archived
+    _put(campaign, "meta", "meta", m)
+    return {"campaign": campaign, "archived": archived}
 
 
 def _saved_settings() -> dict[str, dict]:
@@ -927,7 +1106,7 @@ def campaign_setup_guide() -> dict:
         "saved_characters": [{"name": e["name"], "class": e.get("class", ""), "level": e.get("level", "")}
                              for e in _saved_characters().values()],
         "saved_table_rules": rules,
-        "existing_campaigns": _campaign_names(),
+        "existing_campaigns": _campaign_names(include_hidden=True),
     }
 
 
@@ -937,7 +1116,7 @@ def create_campaign(campaign: str, setting: str, description: str = "", tone: st
     name = _slug(campaign)
     if not name:
         raise GameError("Give the campaign a short name.")
-    if name in _campaign_names():
+    if name in _campaign_names(include_hidden=True):
         raise GameError(f"A campaign called '{name}' already exists. Pick another name, such as '{name}-2'.")
     saved = _saved_settings()
     base = saved.get(_slug(setting)[:40], {})
@@ -978,10 +1157,8 @@ def create_campaign(campaign: str, setting: str, description: str = "", tone: st
 
 def list_campaigns() -> dict:
     """Every campaign saved on this engine, with enough to tell them apart."""
-    with _db() as con:
-        names = [r[0] for r in con.execute("SELECT DISTINCT campaign FROM doc ORDER BY campaign")]
     out = []
-    for c in names:
+    for c in _campaign_names():
         m = _meta(c)
         notes = _get(c, "setting", "notes") or {}
         pcs = [e["name"] for e in _all(c, "entity").values() if e["kind"] == "pc"]
@@ -993,6 +1170,7 @@ def list_campaigns() -> dict:
 # --------------------------------------------------------------- sessions
 
 def session_start(campaign: str) -> dict:
+    _safe_snapshot("before-session")
     m = _meta(campaign)
     records = _all(campaign, "record")
     with _db() as con:
@@ -1084,6 +1262,7 @@ def add_feedback(campaign: str, text: str) -> dict:
 
 def reviewer_brief(campaign: str) -> dict:
     """Everything the Reviewer needs to judge the last session and prepare the next."""
+    _safe_snapshot("before-review")
     m = _meta(campaign)
     since = m.get("session_started", 0)
     with _db() as con:

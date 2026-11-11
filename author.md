@@ -82,7 +82,11 @@ other way:
    exits), what the enemies want besides killing, and how it can go wrong for either side. Build
    creatures with full attack lines. For one character, keep the enemy to about three attacks a round in
    total: one heavy hitter with a few weak allies works better than a crowd. At least one set piece must
-   be able to kill the character if played badly, and none may be unwinnable.
+   be able to kill the character if played badly, and none may be unwinnable. After saving the creatures,
+   run encounter_check on each fight and adjust until the rating fits: the opening fight "fair" or
+   "dangerous", the main set piece "dangerous", nothing "trivial" or "light", and "deadly" only where
+   there is a real way out. Give enemies damage that matters against the character's hit points: a hit
+   should usually cost a tenth of them or more.
 
 8. **Two hard choices** (key `dilemmas`). Situations with no clean answer, where each option costs
    something the player has come to value.

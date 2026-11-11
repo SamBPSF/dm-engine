@@ -225,15 +225,17 @@ g.rest(C7, "long")
 assert g.get_entity(C7, "Vilik")["resources"]["Luck Points"]["current"] == 3
 g.upsert_entity(C7, "Vilik", "pc", {"level": 8})
 assert g.get_entity(C7, "Vilik")["resources"]["Bardic Inspiration"]["current"] == 5
-names = [c["campaign"] for c in g.list_campaigns()["campaigns"]]
-assert C7 in names and "review" in names
+assert C7 not in [c["campaign"] for c in g.list_campaigns()["campaigns"]]  # no setting yet: hidden
 assert "resources" in g.session_start(C7)["party"][0]
 
 # starting a new campaign: saved settings, characters and table rules are reused
 g.set_setting_notes(C7, "Aldenshire", "Pulpy and fast.", ["I roll my own dice."], "Shards linked by gates.")
 g.apply_damage(C7, "Vilik", 30)
 g.use_resource(C7, "Vilik", "Luck Points", 2)
+names = [c["campaign"] for c in g.list_campaigns()["campaigns"]]
+assert C7 in names and "review" not in names
 guide = g.campaign_setup_guide()
+assert "review" in guide["existing_campaigns"]
 assert "Starting a new campaign" in guide["procedure"]
 assert any(x["name"] == "Aldenshire" for x in guide["saved_settings"])
 assert any(x["name"] == "Vilik" for x in guide["saved_characters"])
@@ -323,5 +325,67 @@ assert [e["subject"] for e in est] == ["the-metal"] and "sunbrass" in est[0]["te
 assert g.author_brief("canon-b")["setting_notes"]["description"].startswith("Canals")
 assert "binding" in g.author_brief("canon-b")["procedure"]
 assert g.author_brief(C7)["established_in_this_setting"] == []
+
+# encounter check: weak enemies rate low, heavy ones high, and a crowd is flagged
+CE = "enc"
+g.upsert_entity(CE, "Vilik", "pc", {"max_hp": 73, "ac": 16, "attacks": [
+    {"name": "Eldritch Blast", "to_hit": 8, "damage": "1d10+5", "count": 2}]})
+g.upsert_entity(CE, "Raider", "creature", {"max_hp": 11, "ac": 13,
+                "attacks": [{"name": "Bolt", "to_hit": 4, "damage": "1d6+2"}]})
+g.upsert_entity(CE, "Brute", "creature", {"max_hp": 85, "ac": 15, "attacks_per_round": 2,
+                "attacks": [{"name": "Maul", "to_hit": 8, "damage": "2d10+5"}]})
+g.upsert_entity(CE, "Hamund", "ally", {"max_hp": 40, "ac": 16,
+                "attacks": [{"name": "Crossbow", "to_hit": 6, "damage": "1d10+3"}]})
+weak = g.encounter_check(CE, ["Raider", "Raider"])
+assert weak["rating"] in ("trivial", "light"), weak
+hard = g.encounter_check(CE, ["Brute", "Raider", "Raider"])
+assert hard["rating"] in ("dangerous", "deadly") and hard["expected_hp_lost"] > weak["expected_hp_lost"], hard
+eased = g.encounter_check(CE, ["Brute", "Raider", "Raider"], ["Hamund"])
+assert eased["expected_hp_lost"] < hard["expected_hp_lost"]
+assert "warning" in g.encounter_check(CE, ["Raider"] * 6)
+assert abs(g._avg("2d6+3") - 10) < 1e-9 and abs(g._avg("2d6+3", True) - 7) < 1e-9
+
+# concentration: damage calls for the player's save; creatures roll their own
+g.concentrate(CE, "Vilik", "Hypnotic Pattern")
+ev = g.apply_damage(CE, "Vilik", 30)["events"]
+assert any("Constitution save, DC 15" in x for x in ev), ev
+assert g.concentrate(CE, "Vilik", "")["ended"] == "Hypnotic Pattern"
+assert not g.apply_damage(CE, "Vilik", 5)["events"]
+g.concentrate(CE, "Brute", "Hold Person")
+outcomes = set()
+for _ in range(60):
+    g.concentrate(CE, "Brute", "Hold Person")
+    ev = g.apply_damage(CE, "Brute", 1)["events"]
+    outcomes.add("loses" if any("loses" in x for x in ev) else "holds")
+    g.heal(CE, "Brute", 100)
+assert outcomes == {"loses", "holds"}
+
+# backups: a snapshot restores one campaign and leaves the others alone
+g.set_setting_notes(CE, "Enc", "test")
+b = g.snapshot("test", 0)
+assert b and g.list_backups()["backups"][0]["backup"] == b
+g.apply_damage(CE, "Vilik", 20)
+hp_now = g.get_entity(CE, "Vilik")["hp"]
+g.apply_damage(C9, "Vilik", 7)
+other = g.get_entity(C9, "Vilik")["hp"]
+time_gap = __import__("time"); time_gap.sleep(1.1)
+r = g.restore_campaign(CE, b)
+assert g.get_entity(CE, "Vilik")["hp"] > hp_now and g.get_entity(C9, "Vilik")["hp"] == other
+assert r["undo"]
+for bad in ("../engine.db", "nope.db"):
+    try:
+        g.restore_campaign(CE, bad)
+        raise AssertionError("restored from a bad backup name")
+    except g.GameError:
+        pass
+assert g.snapshot("again") is None  # too soon after the last one
+
+# archive hides a campaign without deleting it
+assert CE in [c["campaign"] for c in g.list_campaigns()["campaigns"]]
+g.archive_campaign(CE)
+assert CE not in [c["campaign"] for c in g.list_campaigns()["campaigns"]]
+assert g.get_entity(CE, "Vilik")["max_hp"] == 73
+g.archive_campaign(CE, False)
+assert CE in [c["campaign"] for c in g.list_campaigns()["campaigns"]]
 
 print("all engine checks passed")

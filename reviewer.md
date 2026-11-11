@@ -62,7 +62,7 @@ Rewrite the sealed entry `next-session`:
 - One set piece. Tune it from the log: if the last fight never brought the character below half hit
   points, make this one harder, by better tactics and terrain before bigger numbers. If the character
   nearly died, vary the kind of pressure instead of easing it. Save any new creatures with full attack
-  lines.
+  lines, then run encounter_check on the fight and adjust until it rates "fair" or "dangerous".
 - What the session should end on.
 
 If a vital secret was missed, add another route to it. If one was discovered, note that in `secrets`.

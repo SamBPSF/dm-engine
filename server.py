@@ -13,7 +13,7 @@ import os
 import uvicorn
 from mcp.server.mcpserver import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
-from starlette.responses import JSONResponse, PlainTextResponse
+from starlette.responses import FileResponse, JSONResponse, PlainTextResponse
 
 import engine
 
@@ -29,6 +29,7 @@ INSTRUCTIONS = """You are the Narrator for a solo D&D 5e game. This engine is th
 - Everything else is rolled here: creature_attack, saving_throw, roll. Report results exactly as returned.
 - The character sheet is on the engine. Look up bonuses, spells and features with get_character; do not
   ask the player for them. Spend limited-use features with use_resource.
+- When anyone casts a concentration spell, call concentrate; the engine then asks for the save on damage.
 - Never track hit points, slots or initiative yourself. The engine's numbers are the truth.
 - Time passing lets villains act. Call advance_time or rest whenever hours pass, and show the consequences.
 - In every fight, call set_battle_map when combat starts and move_token whenever anyone moves. Squares
@@ -107,12 +108,18 @@ def save_character(campaign: str, name: str, kind: str, sheet: dict) -> dict:
     """Create or update a character or creature. kind: pc, ally (fights on the player's side), npc
     (bystander or undecided) or creature (enemy). The kind sets the token colour on the battle grid.
     sheet fields: max_hp, ac, init (bonus), saves {str,dex,con,int,wis,cha: bonus},
-    attacks [{name, to_hit, damage like '1d8+3', type, rider}], resist/immune/vulnerable [types],
+    attacks [{name, to_hit, damage like '1d8+3', type, rider, count}], attacks_per_round,
+    resist/immune/vulnerable [types],
     reactions [{name, ac_bonus}] (player reactions that can turn a hit, such as Shield +5),
     max_slots {'1': 4, ...}, resources {name: {max, recharge: 'short'|'long'}}, notes. A player
     character can also carry abilities, skills, spells, features, inventory, money and level: any
     field is stored. Fields merge over what is already stored."""
-    return _run(engine.upsert_entity, campaign, name, kind, sheet)
+    e = _run(engine.upsert_entity, campaign, name, kind, sheet)
+    if "error" in e:
+        return e
+    # A short receipt, not the whole sheet: get_character returns the full thing when it is needed.
+    return {"saved": e["name"], "kind": e["kind"], "hp": e["hp"], "max_hp": e["max_hp"], "ac": e["ac"],
+            "fields_on_file": sorted(k for k in e if k not in ("id", "name", "kind"))}
 
 
 @mcp.tool()
@@ -241,6 +248,41 @@ def list_campaigns() -> dict:
 
 
 @mcp.tool()
+def concentrate(campaign: str, who: str, spell: str = "") -> dict:
+    """Record that a character starts concentrating on a spell, or pass an empty spell when it ends.
+    While it is set, damage to them triggers the concentration save automatically."""
+    return _run(engine.concentrate, campaign, who, spell)
+
+
+@mcp.tool()
+def encounter_check(campaign: str, enemies: list[str], allies: list[str] | None = None, pc: str = "") -> dict:
+    """AUTHOR AND REVIEWER. Estimate how dangerous a planned fight is for the player character. enemies:
+    creature names already saved, repeating a name for each copy. allies: companions who will fight.
+    Returns a rating (trivial, light, fair, dangerous, deadly) and the numbers behind it."""
+    return _run(engine.encounter_check, campaign, enemies, allies, pc)
+
+
+@mcp.tool()
+def list_backups() -> dict:
+    """List the automatic backups of the saved games, newest first."""
+    return _run(engine.list_backups)
+
+
+@mcp.tool()
+def restore_campaign(campaign: str, backup: str) -> dict:
+    """Put ONE campaign back to how it was in a named backup. Only when the player asks for it. The
+    current state is backed up first, so it can be undone."""
+    return _run(engine.restore_campaign, campaign, backup)
+
+
+@mcp.tool()
+def archive_campaign(campaign: str, archived: bool = True) -> dict:
+    """Hide a campaign from lists and setup without deleting it (archived=false brings it back). Only
+    when the player asks."""
+    return _run(engine.archive_campaign, campaign, archived)
+
+
+@mcp.tool()
 def set_condition(campaign: str, target: str, condition: str, active: bool) -> dict:
     """Add or remove a condition such as poisoned, prone, frightened."""
     return _run(engine.set_condition, campaign, target, condition, active)
@@ -263,7 +305,8 @@ def resolve_check(campaign: str, total: int) -> dict:
 def save_card(campaign: str, name: str, card: dict) -> dict:
     """Create or update a character card. card fields: want, voice, secret, signature_line,
     attitude (hostile, unfriendly, wary, neutral, warm, friendly, devoted), notes."""
-    return _run(engine.save_card, campaign, name, card)
+    c = _run(engine.save_card, campaign, name, card)
+    return c if "error" in c else {"saved": c["name"], "attitude": c["attitude"]}
 
 
 @mcp.tool()
@@ -328,7 +371,8 @@ def author_set_clock(campaign: str, name: str, segments: int, steps: list[str],
                      hours_per_segment: float = 0, filled: int = 0) -> dict:
     """AUTHOR ONLY. Create a villain plan or threat. steps: what changes in the world as each segment fills.
     hours_per_segment > 0 makes it advance on its own as time passes."""
-    return _run(engine.set_clock, campaign, name, segments, steps, hours_per_segment, filled)
+    c = _run(engine.set_clock, campaign, name, segments, steps, hours_per_segment, filled)
+    return c if "error" in c else {"saved": c["name"], "segments": c["segments"], "filled": c["filled"]}
 
 
 @mcp.tool()
@@ -365,6 +409,10 @@ class KeyGate:
         ).strip()
         if not DM_KEY or not hmac.compare_digest(sent, DM_KEY):
             return await JSONResponse({"error": "unauthorized"}, status_code=401)(scope, receive, send)
+        if scope["path"] == "/backup":  # download a fresh copy of every saved game
+            name = engine.snapshot("download", 0)
+            return await FileResponse(os.path.join(engine.BACKUP_DIR, name), filename=f"dm-engine-{name}",
+                                      media_type="application/octet-stream")(scope, receive, send)
         return await self.inner(scope, receive, send)
 
 
