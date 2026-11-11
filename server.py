@@ -31,11 +31,14 @@ INSTRUCTIONS = """You are the Narrator for a solo D&D 5e game. This engine is th
   ask the player for them. Spend limited-use features with use_resource.
 - Never track hit points, slots or initiative yourself. The engine's numbers are the truth.
 - Time passing lets villains act. Call advance_time or rest whenever hours pass, and show the consequences.
-- In every fight, call set_battle_map when combat starts and move_token whenever anyone moves.
-- At the start of each of the player's turns, draw a simple battle grid from the engine's map: 5 ft squares,
-  labelled shapes for cover, hazards and exits, a lettered token for each combatant, the player's token
-  distinct. Use an inline visual if the app can show one, otherwise a plain text grid. Positions come from
-  the engine, never from memory.
+- In every fight, call set_battle_map when combat starts and move_token whenever anyone moves. Squares
+  are named chess-style: column letter, then row number (x=0,y=0 is A1). Use only those names with the player.
+- At the start of each of the player's turns: report every turn taken since their last one, a line each,
+  then show the battle grid. The engine draws it: show the `svg` it returns exactly as given, using any
+  visual tool you have (inline visual, widget or artifact). Print `text_grid` only if you cannot show an image.
+- Anything that tests the player character is the player's roll: saves, checks, contests, escapes. Name
+  the roll and wait for it. Tell the player the total of every attack roll made against them.
+- If creature_attack returns pending, stop and ask the player about the reaction before going on.
 - If the player asks to start a new campaign or adventure, call campaign_setup_guide and follow it. If
   you do not have that tool yet, do it by hand: pick a short new name, save the setting with
   set_setting_notes and the character with save_character, then call author_brief. Never call
@@ -101,9 +104,11 @@ def roll(campaign: str, expression: str, reason: str) -> dict:
 
 @mcp.tool()
 def save_character(campaign: str, name: str, kind: str, sheet: dict) -> dict:
-    """Create or update a character or creature. kind: pc, ally, npc or creature.
+    """Create or update a character or creature. kind: pc, ally (fights on the player's side), npc
+    (bystander or undecided) or creature (enemy). The kind sets the token colour on the battle grid.
     sheet fields: max_hp, ac, init (bonus), saves {str,dex,con,int,wis,cha: bonus},
     attacks [{name, to_hit, damage like '1d8+3', type, rider}], resist/immune/vulnerable [types],
+    reactions [{name, ac_bonus}] (player reactions that can turn a hit, such as Shield +5),
     max_slots {'1': 4, ...}, resources {name: {max, recharge: 'short'|'long'}}, notes. A player
     character can also carry abilities, skills, spells, features, inventory, money and level: any
     field is stored. Fields merge over what is already stored."""
@@ -125,7 +130,7 @@ def start_combat(campaign: str, combatants: list[str], player_initiatives: dict[
 @mcp.tool()
 def set_battle_map(campaign: str, width: int, height: int, features: list[dict],
                    positions: dict[str, list[int]]) -> dict:
-    """Lay out a fight on a grid of 5 ft squares (x east from 0, y south from 0).
+    """Lay out a fight on a grid of 5 ft squares (x east from 0, y south from 0; x=0,y=0 is square A1).
     features: [{name, kind: cover|hazard|wall|exit|other, x, y, w, h}]. positions: {combatant name: [x, y]}.
     Large creatures take a 2x2 block; give their top-left square and set size 'large' on their sheet."""
     return _run(engine.set_battle_map, campaign, width, height, features, positions)
@@ -159,6 +164,13 @@ def end_combat(campaign: str) -> dict:
 def creature_attack(campaign: str, attacker: str, target: str, attack_name: str = "", advantage: str = "none") -> dict:
     """A non-player attacks. The engine rolls to hit and damage and applies it. advantage: none, advantage or disadvantage."""
     return _run(engine.creature_attack, campaign, attacker, target, attack_name, advantage)
+
+
+@mcp.tool()
+def resolve_attack(campaign: str, use_reaction: str = "") -> dict:
+    """Finish an attack that creature_attack paused for the player's decision. use_reaction: the name of
+    the reaction they chose (for example 'Shield'), or empty to take the hit."""
+    return _run(engine.resolve_attack, campaign, use_reaction)
 
 
 @mcp.tool()

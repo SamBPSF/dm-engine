@@ -308,9 +308,44 @@ def spend_slot(campaign: str, caster: str, level: int) -> dict:
 
 # ----------------------------------------------------------------- combat
 
+def _land(campaign: str, a: dict, t: dict, atk: dict, crit: bool, out: dict) -> dict:
+    dmg = roll_expr(atk["damage"], crit=crit)
+    out["damage_roll"] = dmg["detail"]
+    out.update(apply_damage(campaign, t["id"], dmg["total"], atk.get("type", ""), a["name"], crit=crit))
+    if atk.get("rider"):
+        out["rider"] = atk["rider"]
+    return out
+
+
+def resolve_attack(campaign: str, use_reaction: str = "") -> dict:
+    """Finish an attack that was paused so the player could decide on a reaction."""
+    p = _get(campaign, "attack", "pending")
+    if not p:
+        raise GameError("No attack is waiting on the player.")
+    _put(campaign, "attack", "pending", None)
+    a, t = _entity(campaign, p["attacker"]), _entity(campaign, p["target"])
+    out: dict[str, Any] = {"attacker": a["name"], "attack": p["atk"]["name"], "roll": p["roll"]}
+    if use_reaction:
+        out.update({"hit": False, "turned_by": use_reaction, "target": _public(t),
+                    "instruction": f"The attack misses. Spend the cost of {use_reaction} now with "
+                                   "use_resource or spend_slot."})
+        _log(campaign, "attack", f"{a['name']} {p['atk']['name']} vs {t['name']}: {p['roll']} turned by {use_reaction}")
+        return out
+    out.update({"hit": True, "critical": False})
+    _land(campaign, a, t, p["atk"], False, out)
+    _log(campaign, "attack", f"{a['name']} {p['atk']['name']} vs {t['name']}: {p['roll']} HIT")
+    out["instruction"] = "Report this result as rolled. Do not soften, reroll or reinterpret it."
+    return out
+
+
 def creature_attack(campaign: str, attacker: str, target: str, attack_name: str = "",
                     advantage: str = "none") -> dict:
     """The engine rolls a non-player attack and applies the damage. The Narrator only reports it."""
+    if attack_name.upper().startswith("RESOLVE"):
+        return resolve_attack(campaign, attack_name[7:].strip(" :"))
+    earlier = None
+    if _get(campaign, "attack", "pending"):
+        earlier = resolve_attack(campaign)
     a, t = _entity(campaign, attacker), _entity(campaign, target)
     if a["kind"] == "pc":
         raise GameError("The player rolls their own attacks. Use player_attack with the numbers they report.")
@@ -327,16 +362,29 @@ def creature_attack(campaign: str, attacker: str, target: str, attack_name: str 
         "attacker": a["name"], "attack": atk["name"], "roll": f"{detail} + {atk.get('to_hit', 0)} = {total}",
         "hit": hit, "critical": crit,
     }
+    if earlier:
+        out["earlier_attack_applied"] = earlier
+    if t["kind"] == "pc":
+        out["tell_player"] = f"{a['name']} rolls {total} to hit."
+    turners = [r["name"] for r in t.get("reactions", [])
+               if hit and not crit and total < t["ac"] + int(r.get("ac_bonus", 0))]
+    if turners and t["kind"] == "pc" and t["hp"] > 0:
+        _put(campaign, "attack", "pending", {"attacker": a["id"], "target": t["id"], "atk": atk,
+                                              "roll": out["roll"]})
+        out.update({"pending": True, "would_be_turned_by": turners,
+                    "instruction": (f"STOP before any damage. Tell the player: {a['name']} hits with a {total}; "
+                                    f"{' or '.join(turners)} would turn it. Ask if they use it. Then call "
+                                    "resolve_attack with use_reaction set to its name, or empty to take the hit. "
+                                    "If you do not have resolve_attack, call creature_attack again with "
+                                    "attack_name 'RESOLVE' (take the hit) or 'RESOLVE Shield' (use it).")})
+        return out
     if hit:
-        dmg = roll_expr(atk["damage"], crit=crit)
-        out["damage_roll"] = dmg["detail"]
-        out.update(apply_damage(campaign, t["id"], dmg["total"], atk.get("type", ""), a["name"], crit=crit))
-        if atk.get("rider"):
-            out["rider"] = atk["rider"]
+        _land(campaign, a, t, atk, crit, out)
     else:
         out["target"] = _public(t)
     _log(campaign, "attack", f"{a['name']} {atk['name']} vs {t['name']}: {out['roll']} {'HIT' if hit else 'miss'}")
-    out["instruction"] = "Report this result as rolled. Do not soften, reroll or reinterpret it."
+    out["instruction"] = ("Report this result as rolled, including the total to hit when the target is the "
+                          "player. Do not soften, reroll or reinterpret it.")
     return out
 
 
@@ -433,8 +481,8 @@ def next_turn(campaign: str) -> dict:
     out = {"round": s["round"], "now_acting": _public(e)}
     if e["kind"] == "pc":
         out.update(battle_map(campaign))
-        out["draw_grid"] = ("It is the player's turn. Before asking what they do, draw the battle grid from "
-                            "this map: features as labelled shapes, one token per combatant, dead ones removed.")
+        out["draw_grid"] = ("It is the player's turn. First report every turn taken since their last one, a "
+                            "line each. Then show the battle grid as map.how_to_show says. Then ask what they do.")
     if e["kind"] == "pc" and e["hp"] <= 0 and not e.get("stable"):
         out["instruction"] = "The player rolls a death save now. Call death_save with the natural roll."
     elif e["kind"] != "pc":
@@ -474,6 +522,15 @@ def _square(m: dict, xy: list[int]) -> list[int]:
     return [int(xy[0]), int(xy[1])]
 
 
+def _col(x: int) -> str:
+    return chr(65 + x) if x < 26 else "A" + chr(65 + x - 26)
+
+
+def _label(x: int, y: int) -> str:
+    """Chess-style square name: column letter, then row number from 1 at the top."""
+    return f"{_col(x)}{y + 1}"
+
+
 def move_token(campaign: str, name: str, x: int, y: int) -> dict:
     m = _get(campaign, "map", "map")
     if m is None:
@@ -483,22 +540,127 @@ def move_token(campaign: str, name: str, x: int, y: int) -> dict:
     m["positions"][e["id"]] = _square(m, [x, y])
     _put(campaign, "map", "map", m)
     feet = None if old is None else 5 * max(abs(old[0] - x), abs(old[1] - y))
-    return {"moved": e["name"], "to": [x, y], "distance_feet": feet}
+    return {"moved": e["name"], "to": [x, y], "square": _label(x, y), "distance_feet": feet}
+
+
+_FEATURE_STYLE = {  # kind: (fill, stroke, text, text-grid mark)
+    "cover": ("#D3D1C7", "#5F5E5A", "#2C2C2A", "#"),
+    "wall": ("#B4B2A9", "#444441", "#2C2C2A", "X"),
+    "hazard": ("#FAC775", "#854F0B", "#412402", "!"),
+    "exit": ("#C0DD97", "#3B6D11", "#173404", ">"),
+    "other": ("#CECBF6", "#534AB7", "#26215C", "+"),
+}
+_TOKEN_STYLE = {"pc": ("#9FE1CB", "#085041", "#04342C"), "ally": ("#B5D4F4", "#0C447C", "#042C53"),
+                "npc": ("#F1EFE8", "#444441", "#2C2C2A")}  # bystanders and unknowns; enemies are "creature"
+_ENEMY_STYLE = ("#F5C4B3", "#712B13", "#4A1B0C")
+
+
+def _xml(text: str) -> str:
+    return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+
+
+def _codes(tokens: list[dict]) -> None:
+    """Give each token a short code: its initial, numbered where several share one."""
+    by: dict[str, list[dict]] = {}
+    for t in tokens:
+        by.setdefault(t["name"][:1].upper() or "?", []).append(t)
+    for letter, group in by.items():
+        group.sort(key=lambda t: (t["kind"] != "pc", t["name"]))
+        for n, t in enumerate(group, 1):
+            t["code"] = letter if len(group) == 1 or (n == 1 and t["kind"] == "pc") else f"{letter}{n}"
+
+
+def _text_grid(w: int, h: int, feats: list[dict], tokens: list[dict]) -> str:
+    cells = [[" . " for _ in range(w)] for _ in range(h)]
+    for f in feats:
+        mark = _FEATURE_STYLE.get(f.get("kind", "other"), _FEATURE_STYLE["other"])[3]
+        for yy in range(f["y"], min(h, f["y"] + f.get("h", 1))):
+            for xx in range(f["x"], min(w, f["x"] + f.get("w", 1))):
+                cells[yy][xx] = f" {mark} "
+    for t in tokens:
+        cells[t["y"]][t["x"]] = f"{t['code']:^3}"
+    head = "    " + "".join(f"{_col(x):^3}" for x in range(w))
+    return "\n".join([head] + [f"{y + 1:>3} " + "".join(row) for y, row in enumerate(cells)])
+
+
+def _svg_grid(w: int, h: int, feats: list[dict], tokens: list[dict], legend: list[str]) -> str:
+    c = max(18, min(44, 600 // w))
+    left, top = (680 - w * c) // 2 + 8, 30
+    lines, line = [], ""
+    for item in legend:
+        if len(line) + len(item) > 88:
+            lines.append(line)
+            line = ""
+        line = f"{line}  ·  {item}" if line else item
+    lines.append(line)
+    height = top + h * c + 24 + 18 * len(lines)
+    o = [f'<svg width="100%" viewBox="0 0 680 {height}" role="img" xmlns="http://www.w3.org/2000/svg" '
+         f'font-family="sans-serif"><title>Battle grid</title><desc>{_xml("; ".join(legend))}</desc>']
+    for f in feats:
+        fill, stroke, ink, _ = _FEATURE_STYLE.get(f.get("kind", "other"), _FEATURE_STYLE["other"])
+        fw, fh = f.get("w", 1) * c, f.get("h", 1) * c
+        fx, fy = left + f["x"] * c, top + f["y"] * c
+        dash = ' stroke-dasharray="5 3"' if f.get("kind") == "hazard" else ""
+        o.append(f'<rect x="{fx}" y="{fy}" width="{fw}" height="{fh}" rx="3" fill="{fill}" stroke="{stroke}"{dash}/>')
+        name = str(f.get("name", ""))[: max(0, fw // 7)]
+        if name and fh >= 16:
+            o.append(f'<text x="{fx + fw / 2}" y="{fy + fh / 2}" font-size="12" fill="{ink}" text-anchor="middle" '
+                     f'dominant-baseline="central">{_xml(name)}</text>')
+    for x in range(w + 1):
+        o.append(f'<line x1="{left + x * c}" y1="{top}" x2="{left + x * c}" y2="{top + h * c}" stroke="#888780" stroke-width="0.5"/>')
+    for y in range(h + 1):
+        o.append(f'<line x1="{left}" y1="{top + y * c}" x2="{left + w * c}" y2="{top + y * c}" stroke="#888780" stroke-width="0.5"/>')
+    for x in range(w):
+        o.append(f'<text x="{left + x * c + c / 2}" y="{top - 10}" font-size="12" fill="#888780" text-anchor="middle">{_col(x)}</text>')
+    for y in range(h):
+        o.append(f'<text x="{left - 8}" y="{top + y * c + c / 2}" font-size="12" fill="#888780" text-anchor="end" '
+                 f'dominant-baseline="central">{y + 1}</text>')
+    for t in tokens:
+        fill, stroke, ink = _TOKEN_STYLE.get(t["kind"], _ENEMY_STYLE)
+        span = 2 if t.get("size") in ("large", "huge") else 1
+        cx, cy = left + t["x"] * c + span * c / 2, top + t["y"] * c + span * c / 2
+        extra = ' stroke-dasharray="3 2"' if t["status"] in ("down and dying",) else ""
+        o.append(f'<circle cx="{cx}" cy="{cy}" r="{span * c / 2 - 3}" fill="{fill}" stroke="{stroke}" '
+                 f'stroke-width="{2.5 if t["kind"] == "pc" else 1}"{extra}/>')
+        o.append(f'<text x="{cx}" y="{cy}" font-size="{13 if c >= 30 else 11}" font-weight="500" fill="{ink}" '
+                 f'text-anchor="middle" dominant-baseline="central">{_xml(t["code"])}</text>')
+    for n, text in enumerate(lines):
+        o.append(f'<text x="{left}" y="{top + h * c + 24 + 18 * n}" font-size="12" fill="#888780">{_xml(text)}</text>')
+    o.append("</svg>")
+    return "".join(o)
 
 
 def battle_map(campaign: str) -> dict:
     m = _get(campaign, "map", "map")
     if m is None:
         return {"map": None}
+    w, h = m["width"], m["height"]
     tokens = []
     for id, xy in m["positions"].items():
         e = _get(campaign, "entity", id)
-        if e is None:
+        if e is None or _status(e) == "dead":
             continue
-        tokens.append({"name": e["name"], "kind": e["kind"], "x": xy[0], "y": xy[1],
+        tokens.append({"name": e["name"], "kind": e["kind"], "x": xy[0], "y": xy[1], "square": _label(*xy),
                        "status": _status(e), "size": e.get("size", "medium")})
-    return {"map": {"width": m["width"], "height": m["height"], "square_feet": 5,
-                    "features": m["features"], "tokens": tokens}}
+    _codes(tokens)
+    feats = []
+    for f in m["features"]:
+        f = {"kind": "other", "w": 1, "h": 1, **f}
+        f["x"], f["y"] = max(0, min(w - 1, int(f.get("x", 0)))), max(0, min(h - 1, int(f.get("y", 0))))
+        f["w"], f["h"] = max(1, min(w - f["x"], int(f["w"]))), max(1, min(h - f["y"], int(f["h"])))
+        f["squares"] = _label(f["x"], f["y"]) + ("" if f["w"] == f["h"] == 1 else
+                                                 "-" + _label(f["x"] + f["w"] - 1, f["y"] + f["h"] - 1))
+        feats.append(f)
+    legend = [f"{t['code']} {t['name']}" + (" (you)" if t["kind"] == "pc" else "")
+              + ("" if t["status"] in ("unhurt", "hurt") else f", {t['status']}") for t in tokens]
+    legend.append("1 square = 5 ft")
+    return {"map": {"width": w, "height": h, "square_feet": 5, "features": feats, "tokens": tokens,
+                    "svg": _svg_grid(w, h, feats, tokens, legend),
+                    "text_grid": _text_grid(w, h, feats, tokens),
+                    "how_to_show": ("Show `svg` exactly as given, with whatever you have for visuals (an inline "
+                                    "visual or widget tool, or an artifact). Do not redraw it or move anything. "
+                                    "Only if you cannot show an image, print `text_grid` in a code block. Name "
+                                    "squares to the player only by these labels, such as E6.")}}
 
 
 # ----------------------------------------------------- checks and cards
@@ -679,7 +841,8 @@ def set_setting_notes(campaign: str, setting: str, tone: str, table_rules: list[
     """Per-campaign notes that sit on top of the playbook: the setting's name, how it should feel, house rules."""
     prev = _get(campaign, "setting", "notes") or {}
     n = {**prev, "setting": setting, "tone": tone, "table_rules": table_rules or prev.get("table_rules", []),
-         "description": description or prev.get("description", ""), "saved_at": time.time()}
+         "description": description or prev.get("description", ""), "saved_at": time.time(),
+         "canon_version": prev.get("canon_version") if prev else 2}
     _put(campaign, "setting", "notes", n)
     return n
 
@@ -691,6 +854,7 @@ def author_brief(campaign: str) -> dict:
     return {
         "procedure": AUTHOR,
         "setting_notes": _get(campaign, "setting", "notes") or "None saved yet.",
+        "established_in_this_setting": _established(campaign),
         "party": [e for e in ents.values() if e["kind"] in ("pc", "ally")],
         "creatures_on_file": [e["name"] for e in ents.values() if e["kind"] in ("npc", "creature")],
         "cast": list(_all(campaign, "card").values()),
@@ -716,8 +880,26 @@ def _saved_settings() -> dict[str, dict]:
         n = _get(c, "setting", "notes")
         if n and n.get("setting"):
             found.append({**n, "from_campaign": c})
-    found.sort(key=lambda n: n.get("saved_at", 0))
-    return {_slug(n["setting"]): n for n in found}
+    # A setting saved with a description outranks a bare name; within each, the newest wins.
+    found.sort(key=lambda n: (bool(n.get("description")), n.get("saved_at", 0)))
+    return {_slug(n["setting"])[:40]: n for n in found}
+
+
+def _established(campaign: str) -> list[dict]:
+    """Common-knowledge lore written for earlier campaigns in the same setting, to keep names consistent."""
+    mine = _get(campaign, "setting", "notes") or {}
+    if not mine.get("setting"):
+        return []
+    out, size = [], 0
+    for c in _campaign_names():
+        n = _get(c, "setting", "notes") or {}
+        if c == campaign or n.get("canon_version", 0) < 2 or _slug(n.get("setting", "")) != _slug(mine["setting"]):
+            continue
+        for v in _all(c, "sealed").values():
+            if v["key"].startswith("lore-") and size < 12000:
+                out.append({"from_campaign": c, "subject": v["key"][5:], "text": v["content"]})
+                size += len(v["content"])
+    return out
 
 
 def _latest_table_rules(saved: dict[str, dict]) -> list[str]:
@@ -740,7 +922,8 @@ def campaign_setup_guide() -> dict:
     rules = _latest_table_rules(settings)
     return {
         "procedure": SETUP,
-        "saved_settings": [{"name": n["setting"], "tone": n.get("tone", "")} for n in settings.values()],
+        "saved_settings": [{"name": n["setting"], "tone": n.get("tone", "")} for n in settings.values()
+                           if n.get("description")],
         "saved_characters": [{"name": e["name"], "class": e.get("class", ""), "level": e.get("level", "")}
                              for e in _saved_characters().values()],
         "saved_table_rules": rules,
@@ -757,7 +940,7 @@ def create_campaign(campaign: str, setting: str, description: str = "", tone: st
     if name in _campaign_names():
         raise GameError(f"A campaign called '{name}' already exists. Pick another name, such as '{name}-2'.")
     saved = _saved_settings()
-    base = saved.get(_slug(setting), {})
+    base = saved.get(_slug(setting)[:40], {})
     if not description and not base:
         raise GameError(f"No saved setting called '{setting}'. Pass a description of the world, or the feel "
                         "the player wants if the Author is to invent it. Saved: "
@@ -769,7 +952,7 @@ def create_campaign(campaign: str, setting: str, description: str = "", tone: st
              "tone": tone or base.get("tone", ""),
              "table_rules": table_rules,
              "length": length or "A short adventure of two or three sessions.",
-             "saved_at": time.time()}
+             "saved_at": time.time(), "canon_version": 2}
     _put(name, "setting", "notes", notes)
     out: dict[str, Any] = {"campaign": name, "setting_notes": notes}
     if character:

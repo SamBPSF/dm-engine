@@ -104,7 +104,15 @@ g.upsert_entity(C3, "Wolf", "creature", {"max_hp": 11, "ac": 13,
 m = g.set_battle_map(C3, 12, 10, [{"name": "Boulder", "kind": "cover", "x": 7, "y": 4, "w": 2, "h": 1}],
                      {"Vilik": [5, 7], "Wolf": [2, 6]})
 assert len(m["map"]["tokens"]) == 2
-assert g.move_token(C3, "Wolf", 4, 7)["distance_feet"] == 10
+mv = g.move_token(C3, "Wolf", 4, 7)
+assert mv["distance_feet"] == 10 and mv["square"] == "E8"
+bm = g.battle_map(C3)["map"]
+assert bm["svg"].startswith("<svg") and bm["svg"].endswith("</svg>") and ">E<" in bm["svg"]
+assert bm["text_grid"].splitlines()[0].split()[:3] == ["A", "B", "C"]
+assert [t["square"] for t in bm["tokens"] if t["name"] == "Vilik"] == ["F8"]
+assert bm["features"][0]["squares"] == "H5-I5"
+import xml.dom.minidom
+xml.dom.minidom.parseString(bm["svg"])
 try:
     g.move_token(C3, "Wolf", 40, 7)
     raise AssertionError("moved off the grid")
@@ -264,5 +272,56 @@ later = g.session_start(C8)
 assert later["session"] == 2 and "has been given the basics" in later["grounding"]
 g.apply_damage(C8, "Vilik", 5)
 assert g.session_start(C8)["session"] == 3
+
+# an attack that Shield would turn is paused for the player; other hits land as before
+C9 = "react"
+g.upsert_entity(C9, "Vilik", "pc", {"max_hp": 73, "ac": 16, "reactions": [{"name": "Shield", "ac_bonus": 5}]})
+g.upsert_entity(C9, "Raider", "creature", {"max_hp": 20, "ac": 12,
+                "attacks": [{"name": "Bolt", "to_hit": 5, "damage": "1d6+2"}]})
+seen = {"pending": 0, "miss": 0, "hit": 0}
+for _ in range(300):
+    r = g.creature_attack(C9, "Raider", "Vilik", "Bolt")
+    assert "rolls" in r["tell_player"]
+    if r.get("pending"):
+        seen["pending"] += 1
+        hp = g.get_entity(C9, "Vilik")["hp"]
+        total = int(r["roll"].split("=")[1])
+        assert 16 <= total < 21 and hp == g.get_entity(C9, "Vilik")["hp"]
+        if seen["pending"] % 2:
+            done = g.resolve_attack(C9, "Shield")
+            assert not done["hit"] and g.get_entity(C9, "Vilik")["hp"] == hp
+        else:
+            done = g.creature_attack(C9, "Raider", "Vilik", "RESOLVE")
+            assert done["hit"] and g.get_entity(C9, "Vilik")["hp"] < hp
+    elif r["hit"]:
+        seen["hit"] += 1
+    else:
+        seen["miss"] += 1
+    g.heal(C9, "Vilik", 100)
+assert seen["pending"] > 30 and seen["miss"] > 80 and seen["hit"] > 20, seen
+first = g.creature_attack(C9, "Raider", "Vilik", "Bolt")
+while not first.get("pending"):
+    g.heal(C9, "Vilik", 100)
+    first = g.creature_attack(C9, "Raider", "Vilik", "Bolt")
+nxt = g.creature_attack(C9, "Raider", "Vilik", "Bolt")
+assert nxt["earlier_attack_applied"]["hit"]
+if nxt.get("pending"):
+    g.resolve_attack(C9)
+try:
+    g.resolve_attack(C9)
+    raise AssertionError("resolved an attack that was not pending")
+except g.GameError:
+    pass
+
+# canon: a new campaign in a saved setting sees the lore written for earlier ones
+g.create_campaign("canon-a", "Glasswater", description="Canals. Gates open by spoken word.", tone="Wet.")
+g.seal("canon-a", "lore-the-metal", "The metal is called sunbrass.")
+g.seal("canon-a", "villain", "Secret.")
+g.create_campaign("canon-b", "glasswater")
+est = g.author_brief("canon-b")["established_in_this_setting"]
+assert [e["subject"] for e in est] == ["the-metal"] and "sunbrass" in est[0]["text"]
+assert g.author_brief("canon-b")["setting_notes"]["description"].startswith("Canals")
+assert "binding" in g.author_brief("canon-b")["procedure"]
+assert g.author_brief(C7)["established_in_this_setting"] == []
 
 print("all engine checks passed")

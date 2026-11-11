@@ -10,6 +10,14 @@ Do not call session_start while preparing: it is for play only.
 Write an original adventure. Fit the campaign's setting notes and the player character's sheet and
 history, which are in the brief. Do not reuse published adventures.
 
+**The setting description is canon and it is binding.** Every fact in it is true in this adventure
+exactly as written: how travel works, how long things last, who holds what, who exists. Do not improve,
+modernise or swap any of it, even for something that seems to fit the tone better. Where it leaves
+something open, you decide. `established_in_this_setting` holds common knowledge written for earlier
+campaigns in the same world: reuse those names for the same things (the metal, the order, the
+neighbouring land, the church) so the world stays one world. The description wins over them if they
+disagree. This adventure's situation, cast and places are new.
+
 The setting notes in the brief describe the world, its tone, the table rules and how long the
 adventure should be. If the description is only a feel or a genre, invent the world yourself: its
 places, powers and history. Put what the character would know of it into `common-knowledge` and the
@@ -55,8 +63,8 @@ other way:
    plan completes in about three in-game days if the player dawdles. Rests must cost something.
 
 4. **The cast** (save_card for each, five to seven people). Each wants something that collides with
-   someone else's want. Include: an ally with a secret, an enemy who could be won over, an innocent at
-   risk, and someone who is simply in the way. Give each a voice a reader could hear and one line only
+   someone else's want. Include: an ally with a secret, an enemy who could be won over, someone who
+   cannot protect themselves (vary who: not a child by default), and someone who is simply in the way. Give each a voice a reader could hear and one line only
    they would say.
 
 5. **Secrets and clues** (key `secrets`). Eight to ten true things the player could discover. Do not tie
@@ -113,6 +121,7 @@ entry with the session it is most likely needed in.
 
 ## Before you finish, check
 
+- Read the setting description once more, line by line. Does anything you wrote contradict it?
 - Could a reader describe the villain's voice and want after one meeting?
 - Is there a moment in the first session where the character can be hurt, by something that will
   actually strike? Is any threat in the opening one that its holders would not carry out? Rewrite it.
