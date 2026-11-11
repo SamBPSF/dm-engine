@@ -524,6 +524,47 @@ assert link["shelf"] == "ravenloft" and g.upload_ticket(token) == "ravenloft" an
 assert "~lore" not in g._campaign_names(include_hidden=True)
 
 
+# character library: one master sheet per character, apart from every campaign
+lib = g.character_library()["characters"]
+assert [c["name"] for c in lib] == ["Vilik"] and lib[0]["from_campaign"] == C7    # backfilled at campaign creation
+master = g.character_library("Vilik")["character"]
+assert master["hp"] == 73 and master["level"] == 8 and master["resources"]["Luck Points"]["current"] == 3
+g.library_save("Mira", {"max_hp": 31, "ac": 14, "class": "Rogue", "level": 4, "max_slots": {"1": 2},
+                        "resources": {"Second Wind": {"max": 1}}})
+assert len(g.character_library()["characters"]) == 2
+assert any(x["name"] == "Mira" for x in g.campaign_setup_guide()["saved_characters"])
+g.create_campaign("lib-test", "aldenshire", character="Mira")
+mira = g.get_entity("lib-test", "Mira")
+assert mira["kind"] == "pc" and mira["hp"] == 31 and mira["slots"] == {"1": 2} and "library" not in mira
+g.apply_damage("lib-test", "Mira", 20)
+g.set_condition("lib-test", "Mira", "poisoned", True)
+g.upsert_entity("lib-test", "Mira", "pc", {"level": 5, "max_hp": 38})
+assert g.character_library("Mira")["character"]["max_hp"] == 31                    # play does not touch the master
+g.session_start("lib-test")
+end = g.session_end("lib-test", "s", [])
+assert "library_save" in end["character_library"] and "level 5" in end["character_library"]
+g.session_start("lib-test")
+assert "character_library" not in g.session_end("lib-test", "s", [])              # asked once per level
+up = g.library_save("Mira", from_campaign="lib-test")
+assert "now level 5 with 38" in up["changed"]
+m2 = g.character_library("Mira")
+assert m2["character"]["hp"] == 38 and m2["character"]["conditions"] == [] and "lib-test" in m2["in_campaigns"]
+assert g.library_restore_previous("Mira")["restored"]["level"] == 4
+g.library_save("Mira", {"level": 6})                                              # a partial update merges
+assert g.character_library("Mira")["character"]["class"] == "Rogue"
+g.apply_damage("lib-test", "Mira", 500)
+try:
+    g.library_save("Mira", from_campaign="lib-test")
+    raise AssertionError("a dead character was copied to the library")
+except g.GameError:
+    pass
+g.library_retire("Mira")
+assert not any(x["name"] == "Mira" for x in g.campaign_setup_guide()["saved_characters"])
+assert "retired" in [c for c in g.character_library()["characters"] if c["name"] == "Mira"][0]
+assert "~library" not in g._campaign_names(include_hidden=True)
+assert g.open_sealed(CC, 'call: character_library {}')["characters"]
+assert "changed" not in g.open_sealed(C7, 'call: library_save {"name": "Vilik", "from_campaign": "this"}')
+
 # newer tools are reachable through open_sealed for chats with an out-of-date tool list
 assert g.open_sealed(CC, 'call: lore_search {"query": "darklord prison"}')["results"]
 assert g.open_sealed(CC, "upload link")["shelf"] == "ravenloft"

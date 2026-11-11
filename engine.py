@@ -1305,6 +1305,146 @@ def rest(campaign: str, kind: str) -> dict:
     return out
 
 
+# ------------------------------------------------------ character library
+#
+# One master sheet per player character, kept apart from every campaign. A new campaign takes a rested
+# copy. The master changes only when the player says so, so a death or a bad turn in one game never
+# reaches the library by accident.
+
+LIBRARY = "~library"
+_PLAY_STATE = ("_from", "dead", "stable", "condition_info", "concentrating", "library")
+
+
+def _fresh(sheet: dict) -> dict:
+    """A copy of a sheet with everything from play wiped: full hit points, slots and resources."""
+    e = json.loads(json.dumps({k: v for k, v in sheet.items() if k not in _PLAY_STATE}))
+    e.update({"kind": "pc", "hp": e["max_hp"], "temp_hp": 0, "conditions": [],
+              "death": {"successes": 0, "failures": 0}})
+    if "max_slots" in e:
+        e["slots"] = dict(e["max_slots"])
+    for r in e.get("resources", {}).values():
+        r["current"] = r.get("max", 0)
+    return e
+
+
+def _library_line(e: dict) -> dict:
+    info = e.get("library", {})
+    line = {"name": e["name"], "class": e.get("class", ""), "level": e.get("level", ""),
+            "species": e.get("species", ""), "max_hp": e["max_hp"], "ac": e.get("ac", 10),
+            "updated": info.get("updated", ""), "from_campaign": info.get("from_campaign", "")}
+    if info.get("retired"):
+        line["retired"] = True
+    return {k: v for k, v in line.items() if v != ""}
+
+
+def library_save(name: str, sheet: dict | None = None, from_campaign: str = "") -> dict:
+    """Put a character in the library, or update the one there. Either pass the sheet (fields merge over
+    what is stored) or name a campaign to take that campaign's current version of the character."""
+    id = _slug(name)
+    if not id:
+        raise GameError("Name the character.")
+    old = _get(LIBRARY, "character", id)
+    if from_campaign:
+        src = _get(from_campaign, "entity", id)
+        if src is None or src.get("kind") != "pc":
+            raise GameError(f"No player character called '{name}' in campaign '{from_campaign}'.")
+        if src.get("dead"):
+            raise GameError(f"{src['name']} died in '{from_campaign}'. The library copy is unchanged. To stop "
+                            "offering this character for new games, use library_retire.")
+        new = _fresh(src)
+    elif sheet:
+        merged = {**(old or {}), **sheet, "id": id, "name": (old or {}).get("name", name)}
+        if "max_hp" not in merged:
+            raise GameError("The sheet needs max_hp (and ac) at least. Pass the whole sheet the first time.")
+        merged.setdefault("ac", 10)
+        for key, default in (("attacks", []), ("saves", {}), ("init", 0)):
+            merged.setdefault(key, default)
+        for r in merged.get("resources", {}).values():
+            r.setdefault("recharge", "long")
+        new = _fresh(merged)
+    else:
+        raise GameError("Pass the character's sheet, or from_campaign to copy the version in that campaign.")
+    new["library"] = {"updated": time.strftime("%Y-%m-%d", time.gmtime()),
+                      "from_campaign": from_campaign or (old or {}).get("library", {}).get("from_campaign", "")}
+    if old:
+        _put(LIBRARY, "previous", id, old)      # one step of undo
+    _put(LIBRARY, "character", id, new)
+    out = {"saved_to_library": _library_line(new), "fields_on_file": sorted(k for k in new if k != "library")}
+    if old and (str(old.get("level", "")), old["max_hp"]) != (str(new.get("level", "")), new["max_hp"]):
+        out["changed"] = (f"Was level {old.get('level', '?')} with {old['max_hp']} hit points; now level "
+                          f"{new.get('level', '?')} with {new['max_hp']}.")
+    if old:
+        out["undo"] = "The earlier version is kept. Call library_restore_previous to put it back."
+    return out
+
+
+def library_restore_previous(name: str) -> dict:
+    id = _slug(name)
+    prev, cur = _get(LIBRARY, "previous", id), _get(LIBRARY, "character", id)
+    if not prev:
+        raise GameError(f"No earlier version of '{name}' is kept.")
+    _put(LIBRARY, "character", id, prev)
+    _put(LIBRARY, "previous", id, cur)
+    return {"restored": _library_line(prev)}
+
+
+def character_library(name: str = "") -> dict:
+    """List the characters in the library, or give one character's full sheet."""
+    if name:
+        e = _get(LIBRARY, "character", _slug(name))
+        if e is None:
+            known = ", ".join(c["name"] for c in _all(LIBRARY, "character").values() if c) or "none yet"
+            raise GameError(f"No character called '{name}' in the library. In it: {known}.")
+        playing = [c for c in _campaign_names() if (_get(c, "entity", e["id"]) or {}).get("kind") == "pc"]
+        return {"character": e, "in_campaigns": playing}
+    chars = [_library_line(e) for e in _all(LIBRARY, "character").values() if e]
+    return {"characters": sorted(chars, key=lambda c: c["name"]),
+            "note": "Each new campaign takes a fully rested copy. The library copy changes only when the "
+                    "player asks, with library_save."}
+
+
+def library_retire(name: str, retired: bool = True) -> dict:
+    """Stop offering a character for new campaigns without deleting them. Reversible."""
+    e = _get(LIBRARY, "character", _slug(name))
+    if e is None:
+        raise GameError(f"No character called '{name}' in the library.")
+    e.setdefault("library", {})["retired"] = retired
+    _put(LIBRARY, "character", e["id"], e)
+    return {"character": e["name"], "retired": retired}
+
+
+def _library_backfill(campaign: str) -> list[str]:
+    """Any player character in this campaign who is not in the library yet is added, so nobody is lost."""
+    added = []
+    if campaign not in _campaign_names():       # scratch and archived campaigns do not feed the library
+        return added
+    for e in _all(campaign, "entity").values():
+        if e.get("kind") == "pc" and not e.get("dead") and _get(LIBRARY, "character", e["id"]) is None:
+            new = _fresh(e)
+            new["library"] = {"updated": time.strftime("%Y-%m-%d", time.gmtime()), "from_campaign": campaign}
+            _put(LIBRARY, "character", e["id"], new)
+            added.append(e["name"])
+    return added
+
+
+def _library_drift(campaign: str) -> str | None:
+    """Say so, once per level, when a character has grown past their library copy."""
+    m = _meta(campaign)
+    for e in _all(campaign, "entity").values():
+        lib = _get(LIBRARY, "character", e["id"]) if e.get("kind") == "pc" and not e.get("dead") else None
+        if not lib:
+            continue
+        now, was = (str(e.get("level", "")), e["max_hp"]), (str(lib.get("level", "")), lib["max_hp"])
+        if now != was and m.get("library_asked") != list(now):
+            m["library_asked"] = list(now)
+            _put(campaign, "meta", "meta", m)
+            return (f"{e['name']} is level {now[0] or '?'} with {now[1]} hit points in this campaign; the library "
+                    f"copy is level {was[0] or '?'} with {was[1]}. Ask the player once whether new campaigns "
+                    f"should start from this version. If yes, call library_save with name '{e['name']}' and "
+                    f"from_campaign '{campaign}'.")
+    return None
+
+
 # ------------------------------------------------------------ lore shelf
 #
 # Books and notes for a published or home-made setting, kept per setting and shared by every campaign
@@ -1674,7 +1814,8 @@ def _call_by_name(campaign: str, text: str) -> dict:
     reachable = {f.__name__: f for f in (
         concentrate, encounter_check, resolve_attack, set_condition, saving_throw, lore_search, lore_shelf,
         lore_upload_link, lore_add, lore_remove, list_backups, archive_campaign, campaign_setup_guide,
-        create_campaign, use_resource)}
+        create_campaign, use_resource, character_library, library_save, library_retire,
+        library_restore_previous)}
     m = re.match(r"\s*(\w+)\s*(\{.*\})?\s*$", text, re.S)
     if not m or m.group(1) not in reachable:
         raise GameError("Use 'call: <tool> <JSON arguments>'. Reachable this way: " + ", ".join(sorted(reachable)) + ".")
@@ -1684,8 +1825,12 @@ def _call_by_name(campaign: str, text: str) -> dict:
     except ValueError as ex:
         raise GameError(f"The arguments are not valid JSON: {ex}")
     params = list(inspect.signature(fn).parameters)
-    if params and params[0] in ("campaign", "name", "setting") and params[0] not in args:
+    if "from_campaign" in params and args.get("from_campaign") == "this":
+        args["from_campaign"] = campaign
+    if params and params[0] in ("campaign", "setting") and params[0] not in args:
         args[params[0]] = campaign
+    if fn in (lore_shelf, lore_search) and "name" not in args:
+        args["name"] = campaign
     try:
         return fn(**args)
     except TypeError as ex:
@@ -1728,6 +1873,7 @@ def set_setting_notes(campaign: str, setting: str, tone: str, table_rules: list[
 def author_brief(campaign: str) -> dict:
     """Everything the Author needs: the procedure and the full current state of the campaign."""
     _safe_snapshot("before-author")
+    _library_backfill(campaign)
     m = _meta(campaign)
     ents = _all(campaign, "entity")
     return {
@@ -1752,7 +1898,8 @@ def author_brief(campaign: str) -> dict:
 def _campaign_names(include_hidden: bool = False) -> list[str]:
     """Campaign names. Archived campaigns and scratch ones with no setting are hidden unless asked for."""
     with _db() as con:
-        names = [r[0] for r in con.execute("SELECT DISTINCT campaign FROM doc ORDER BY campaign")]
+        names = [r[0] for r in con.execute("SELECT DISTINCT campaign FROM doc ORDER BY campaign")
+                 if not r[0].startswith("~")]
     if include_hidden:
         return names
     return [c for c in names
@@ -1804,12 +1951,20 @@ def _latest_table_rules(saved: dict[str, dict]) -> list[str]:
 
 
 def _saved_characters() -> dict[str, dict]:
-    """Player characters in any campaign. Where one appears twice, the fullest sheet wins."""
+    """Characters a new campaign can start with: the library, then any player character found only in
+    a campaign (the fullest sheet where there are several)."""
     out: dict[str, dict] = {}
     for c in _campaign_names():
         for e in _all(c, "entity").values():
-            if e["kind"] == "pc" and len(e) > len(out.get(e["id"], {})):
+            if e["kind"] == "pc" and not e.get("dead") and len(e) > len(out.get(e["id"], {})):
                 out[e["id"]] = {**e, "_from": c}
+    for id, e in _all(LIBRARY, "character").items():
+        if not e:
+            continue
+        if e.get("library", {}).get("retired"):
+            out.pop(id, None)
+        else:
+            out[id] = {**e, "_from": "the library"}
     return out
 
 
@@ -1855,20 +2010,20 @@ def create_campaign(campaign: str, setting: str, description: str = "", tone: st
     if character:
         src = _saved_characters().get(_slug(character))
         if src is None:
-            out["character"] = (f"No saved character called '{character}'. Ask the player for the sheet and "
-                                "save it with save_character before running the Author.")
+            out["character"] = (f"No character called '{character}' in the library. Ask the player for the "
+                                "sheet, save it with library_save, then copy it into this campaign by "
+                                f"calling save_character('{name}', ...) with the same sheet, before running "
+                                "the Author.")
         else:
-            e = {k: v for k, v in src.items() if k not in ("_from", "dead", "stable", "condition_info", "concentrating")}
-            e.update({"hp": e["max_hp"], "temp_hp": 0, "conditions": [],
-                      "death": {"successes": 0, "failures": 0}})
-            if "max_slots" in e:
-                e["slots"] = dict(e["max_slots"])
-            for r in e.get("resources", {}).values():
-                r["current"] = r.get("max", 0)
+            e = _fresh(src)
             _put(name, "entity", e["id"], e)
-            out["character"] = f"{e['name']} copied from '{src['_from']}', fully rested."
+            if _get(LIBRARY, "character", e["id"]) is None:      # found only in an older campaign: keep it
+                _put(LIBRARY, "character", e["id"], {**_fresh(src), "library": {
+                    "updated": time.strftime("%Y-%m-%d", time.gmtime()), "from_campaign": src["_from"]}})
+            out["character"] = f"{e['name']} copied from {src['_from']}, fully rested."
     else:
-        out["character"] = "None yet. Save the player character with save_character before running the Author."
+        out["character"] = ("None yet. Save the player character with library_save, and into this campaign "
+                            "with save_character, before running the Author.")
     shelf = _shelf_summary(name)
     out["lore_shelf"] = shelf["books"] if shelf else (
         "No books on this setting's shelf. If the player has said they own books or notes for it, call "
@@ -1970,9 +2125,14 @@ def session_end(campaign: str, summary: str, open_threads: list[str], record: st
         "session": m["session"], "summary": summary, "open_threads": open_threads,
         "record": record, "pc_damage_taken": m["session_damage"]})
     _log(campaign, "session", f"Session {m['session']} ended. PC damage taken: {m['session_damage']}. {summary}")
-    return {"session": m["session"], "pc_damage_taken": m["session_damage"], "saved": True,
-            "next": ("Ask the player whether to run the Reviewer now. If yes, call reviewer_brief in this "
-                     "chat and follow its procedure without revealing anything.")}
+    out = {"session": m["session"], "pc_damage_taken": m["session_damage"], "saved": True,
+           "next": ("Ask the player whether to run the Reviewer now. If yes, call reviewer_brief in this "
+                    "chat and follow its procedure without revealing anything.")}
+    _library_backfill(campaign)
+    drift = _library_drift(campaign)
+    if drift:
+        out["character_library"] = drift
+    return out
 
 
 def add_feedback(campaign: str, text: str) -> dict:
