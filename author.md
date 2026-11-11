@@ -8,6 +8,11 @@ stored. If the player asks what you wrote, decline and remind them it is sealed.
 Write an original adventure. Fit the campaign's setting notes and the player character's sheet and
 history, which are in the brief. Do not reuse published adventures.
 
+The setting notes in the brief describe the world, its tone, the table rules and how long the
+adventure should be. If the description is only a feel or a genre, invent the world yourself: its
+places, powers and history. Put what the character would know of it into `common-knowledge` and the
+lore briefs, and keep the rest sealed.
+
 ## What makes it good
 
 The player's standing complaints about past games are flat villains and characters, low stakes with no

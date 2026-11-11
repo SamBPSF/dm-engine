@@ -36,6 +36,7 @@ INSTRUCTIONS = """You are the Narrator for a solo D&D 5e game. This engine is th
   labelled shapes for cover, hazards and exits, a lettered token for each combatant, the player's token
   distinct. Use an inline visual if the app can show one, otherwise a plain text grid. Positions come from
   the engine, never from memory.
+- If the player asks to start a new campaign or adventure, call campaign_setup_guide and follow it.
 - If the player asks you to "run the Author" or prepare a campaign, call author_brief and follow its
   procedure. That work is sealed: your visible replies must reveal none of it.
 - When the player says how the game feels or what they want changed, save it with add_feedback.
@@ -203,6 +204,22 @@ def use_resource(campaign: str, who: str, name: str, amount: int = 1) -> dict:
 
 
 @mcp.tool()
+def campaign_setup_guide() -> dict:
+    """Start here when the player asks to start, create or set up a NEW campaign or adventure. Returns the
+    setup procedure plus the settings, characters and table rules already saved."""
+    return _run(engine.campaign_setup_guide)
+
+
+@mcp.tool()
+def create_campaign(campaign: str, setting: str, description: str = "", tone: str = "",
+                    table_rules: list[str] | None = None, character: str = "", length: str = "") -> dict:
+    """Create a new campaign. A saved setting is copied by name; pass description and tone only for a new
+    or invented one. Naming a saved character copies their sheet, fully rested. Empty table_rules reuses
+    the player's saved rules."""
+    return _run(engine.create_campaign, campaign, setting, description, tone, table_rules, character, length)
+
+
+@mcp.tool()
 def list_campaigns() -> dict:
     """List every campaign saved on this engine: name, setting, characters and sessions played."""
     return _run(engine.list_campaigns)
@@ -247,10 +264,11 @@ def adjust_attitude(campaign: str, name: str, steps: int, reason: str) -> dict:
 
 
 @mcp.tool()
-def set_setting_notes(campaign: str, setting: str, tone: str, table_rules: list[str] | None = None) -> dict:
-    """Save this campaign's setting name, tone and house rules. They apply on top of the playbook
-    and win where the two disagree."""
-    return _run(engine.set_setting_notes, campaign, setting, tone, table_rules)
+def set_setting_notes(campaign: str, setting: str, tone: str, table_rules: list[str] | None = None,
+                      description: str = "") -> dict:
+    """Save this campaign's setting name, tone, house rules and a description of the world. They apply
+    on top of the playbook and win where the two disagree."""
+    return _run(engine.set_setting_notes, campaign, setting, tone, table_rules, description)
 
 
 @mcp.tool()

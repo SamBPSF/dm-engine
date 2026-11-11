@@ -221,4 +221,34 @@ names = [c["campaign"] for c in g.list_campaigns()["campaigns"]]
 assert C7 in names and "review" in names
 assert "resources" in g.session_start(C7)["party"][0]
 
+# starting a new campaign: saved settings, characters and table rules are reused
+g.set_setting_notes(C7, "Aldenshire", "Pulpy and fast.", ["I roll my own dice."], "Shards linked by gates.")
+g.apply_damage(C7, "Vilik", 30)
+g.use_resource(C7, "Vilik", "Luck Points", 2)
+guide = g.campaign_setup_guide()
+assert "Starting a new campaign" in guide["procedure"]
+assert any(x["name"] == "Aldenshire" for x in guide["saved_settings"])
+assert any(x["name"] == "Vilik" for x in guide["saved_characters"])
+assert guide["saved_table_rules"] == ["I roll my own dice."]
+nc = g.create_campaign("Aldenshire 2", "aldenshire", character="vilik")
+assert nc["campaign"] == "aldenshire-2" and nc["setting_notes"]["description"] == "Shards linked by gates."
+assert nc["setting_notes"]["table_rules"] == ["I roll my own dice."]
+copy = g.get_entity("aldenshire-2", "Vilik")
+assert copy["hp"] == 73 and copy["resources"]["Luck Points"]["current"] == 3 and copy["skills"]["persuasion"] == 11
+assert g.get_entity(C7, "Vilik")["hp"] == 43
+try:
+    g.create_campaign("aldenshire-2", "aldenshire")
+    raise AssertionError("created a campaign over an existing one")
+except g.GameError:
+    pass
+try:
+    g.create_campaign("mystery", "Nowhere")
+    raise AssertionError("created a campaign with no setting described")
+except g.GameError:
+    pass
+inv = g.create_campaign("dunes", "The Glass Dunes", description="Invent one: desert survival horror.",
+                        tone="Harsh and desperate.")
+assert inv["setting_notes"]["table_rules"] == ["I roll my own dice."] and "None yet" in inv["character"]
+assert "invent the world" in g.author_brief("dunes")["procedure"]
+
 print("all engine checks passed")

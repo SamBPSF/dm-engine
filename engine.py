@@ -32,6 +32,7 @@ def _doc(name: str) -> str:
 PLAYBOOK = _doc("playbook.md")
 AUTHOR = _doc("author.md")
 REVIEWER = _doc("reviewer.md")
+SETUP = _doc("setup.md")
 
 
 # ---------------------------------------------------------------- storage
@@ -673,9 +674,12 @@ def open_sealed(campaign: str, key: str) -> dict:
             "instruction": "For your eyes only. Use it to run the scene. Never quote or summarise it to the player."}
 
 
-def set_setting_notes(campaign: str, setting: str, tone: str, table_rules: list[str] | None = None) -> dict:
+def set_setting_notes(campaign: str, setting: str, tone: str, table_rules: list[str] | None = None,
+                      description: str = "") -> dict:
     """Per-campaign notes that sit on top of the playbook: the setting's name, how it should feel, house rules."""
-    n = {"setting": setting, "tone": tone, "table_rules": table_rules or []}
+    prev = _get(campaign, "setting", "notes") or {}
+    n = {**prev, "setting": setting, "tone": tone, "table_rules": table_rules or prev.get("table_rules", []),
+         "description": description or prev.get("description", "")}
     _put(campaign, "setting", "notes", n)
     return n
 
@@ -698,6 +702,89 @@ def author_brief(campaign: str) -> dict:
         "recent_events": recent_log(campaign, 60)["log"],
         "secrecy": "Nothing you read or write here may appear in your visible replies.",
     }
+
+
+def _campaign_names() -> list[str]:
+    with _db() as con:
+        return [r[0] for r in con.execute("SELECT DISTINCT campaign FROM doc ORDER BY campaign")]
+
+
+def _saved_settings() -> dict[str, dict]:
+    """Settings already described in any campaign, newest campaign winning, keyed by slug."""
+    out: dict[str, dict] = {}
+    for c in _campaign_names():
+        n = _get(c, "setting", "notes")
+        if n and n.get("setting"):
+            out[_slug(n["setting"])] = {**n, "from_campaign": c}
+    return out
+
+
+def _saved_characters() -> dict[str, dict]:
+    """Player characters in any campaign. Where one appears twice, the fullest sheet wins."""
+    out: dict[str, dict] = {}
+    for c in _campaign_names():
+        for e in _all(c, "entity").values():
+            if e["kind"] == "pc" and len(e) > len(out.get(e["id"], {})):
+                out[e["id"]] = {**e, "_from": c}
+    return out
+
+
+def campaign_setup_guide() -> dict:
+    settings = _saved_settings()
+    rules = next((n["table_rules"] for n in reversed(list(settings.values())) if n.get("table_rules")), [])
+    return {
+        "procedure": SETUP,
+        "saved_settings": [{"name": n["setting"], "tone": n.get("tone", "")} for n in settings.values()],
+        "saved_characters": [{"name": e["name"], "class": e.get("class", ""), "level": e.get("level", "")}
+                             for e in _saved_characters().values()],
+        "saved_table_rules": rules,
+        "existing_campaigns": _campaign_names(),
+    }
+
+
+def create_campaign(campaign: str, setting: str, description: str = "", tone: str = "",
+                    table_rules: list[str] | None = None, character: str = "", length: str = "") -> dict:
+    """Set up a new campaign: its setting notes and, if a saved character is named, a rested copy of them."""
+    name = _slug(campaign)
+    if not name:
+        raise GameError("Give the campaign a short name.")
+    if name in _campaign_names():
+        raise GameError(f"A campaign called '{name}' already exists. Pick another name, such as '{name}-2'.")
+    saved = _saved_settings()
+    base = saved.get(_slug(setting), {})
+    if not description and not base:
+        raise GameError(f"No saved setting called '{setting}'. Pass a description of the world, or the feel "
+                        "the player wants if the Author is to invent it. Saved: "
+                        + (", ".join(n["setting"] for n in saved.values()) or "none") + ".")
+    if table_rules is None:
+        table_rules = base.get("table_rules") or next(
+            (n["table_rules"] for n in reversed(list(saved.values())) if n.get("table_rules")), [])
+    notes = {"setting": setting or base.get("setting", name),
+             "description": description or base.get("description", ""),
+             "tone": tone or base.get("tone", ""),
+             "table_rules": table_rules,
+             "length": length or "A short adventure of two or three sessions."}
+    _put(name, "setting", "notes", notes)
+    out: dict[str, Any] = {"campaign": name, "setting_notes": notes}
+    if character:
+        src = _saved_characters().get(_slug(character))
+        if src is None:
+            out["character"] = (f"No saved character called '{character}'. Ask the player for the sheet and "
+                                "save it with save_character before running the Author.")
+        else:
+            e = {k: v for k, v in src.items() if k not in ("_from", "dead", "stable")}
+            e.update({"hp": e["max_hp"], "temp_hp": 0, "conditions": [],
+                      "death": {"successes": 0, "failures": 0}})
+            if "max_slots" in e:
+                e["slots"] = dict(e["max_slots"])
+            for r in e.get("resources", {}).values():
+                r["current"] = r.get("max", 0)
+            _put(name, "entity", e["id"], e)
+            out["character"] = f"{e['name']} copied from '{src['_from']}', fully rested."
+    else:
+        out["character"] = "None yet. Save the player character with save_character before running the Author."
+    out["next"] = f"Call author_brief('{name}') and follow its procedure. Reveal nothing."
+    return out
 
 
 def list_campaigns() -> dict:
