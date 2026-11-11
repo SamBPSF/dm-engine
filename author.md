@@ -25,6 +25,20 @@ consequences, and slow pacing. Everything you write should be an answer to those
 - Somebody the player can care about is in the way of harm, and can actually be lost.
 - Doing nothing is a choice with a price. Time is the villain's ally.
 
+Three things the player has said about past openings, which override anything below that pulls the
+other way:
+
+- **Threats must be real.** A weapon that is pointed gets used when there is cause. Never write a
+  threat whose holders have a reason not to carry it out, and never write a scene whose only danger is
+  "be polite or else". A standoff is not action.
+- **Caring is earned, not assumed.** In the first session the stakes belong to the character: their
+  own life, the companions they travel with, the thing they came for. A stranger's cause can matter
+  later, once play has given the player a reason to care about that stranger.
+- **Match the tone in what the player actually does.** Decide what the player will spend most of the
+  first session doing, and make it fit the setting notes. For an action tone that is fighting, fleeing,
+  climbing, breaking in, surviving. Talk scenes are short and happen between those. A negotiation is
+  never the spine of a first session unless the tone asks for intrigue above all.
+
 ## Write these, in this order
 
 1. **Premise** (key `premise`). Three sentences: what is happening, why it reaches this character, what
@@ -32,8 +46,9 @@ consequences, and slow pacing. Everything you write should be an answer to those
 
 2. **The villain** (key `villain`, plus a card). A person, not a force. Give them: what they want and the
    human reason for it; their method; what they will never do; what they are wrong about; how they see
-   the player character; a lieutenant who could be turned. Plan a first meeting early, somewhere a fight
-   is impossible, so the player knows their face and voice.
+   the player character; a lieutenant who could be turned. Let the player see the villain early, in a way that
+   shows what they are: doing something, giving an order, leaving a mark. This does not have to be a
+   conversation, and it must not be a meeting where everyone is forced to be civil.
 
 3. **Clocks** (author_set_clock). One main plan of six segments, where each step is a visible change in
    the world that hurts. One or two smaller clocks for side threats. Set hours_per_segment so the whole
@@ -74,9 +89,17 @@ consequences, and slow pacing. Everything you write should be an answer to those
    what people say about it. The Narrator reads these out, more or less as written, when the subject
    first matters. Six to ten is usually right. Keep anything sealed out of them.
 
-10. **The opening** (key `opening`). It follows the "where you stand" briefing, so it can start in
-    motion: a specific place, something happening, a choice within the Narrator's first scene. It may
-    use only names from `common-knowledge`, or introduce a new one on the spot with a face and a role.
+10. **The opening** (key `opening`). It follows the "where you stand" briefing. Choose one of two kinds
+    and commit to it:
+    - **Real action.** Something is already hurting the character or their people, or will within the
+      first exchange: an ambush, a collapse, a pursuit, a thing that should not be there. The player
+      has to act to survive it, and it is resolved with dice.
+    - **Something strange.** No danger yet, but a wonder, a wrongness or a puzzle that pulls the player
+      to look closer, and that leads into danger within a scene or two.
+    Not a standoff, not a parley, not someone else's quarrel that the character happens to walk into.
+    The scene has to make sense from the briefing alone: it may not depend on factions, customs or
+    history the player has only just been told about. It may use only names from `common-knowledge`,
+    or introduce one new name on the spot with a face and a role.
 
 11. **Session guide** (key `next-session`). What the Narrator should open first, the two or three scenes
     most likely to happen, which clock is closest to moving, and what the session should end on.
@@ -87,7 +110,10 @@ entry with the session it is most likely needed in.
 ## Before you finish, check
 
 - Could a reader describe the villain's voice and want after one meeting?
-- Is there a moment in the first session where the character can be hurt?
+- Is there a moment in the first session where the character can be hurt, by something that will
+  actually strike? Is any threat in the opening one that its holders would not carry out? Rewrite it.
+- What does the player spend most of the first session doing, and does that match the tone?
+- In the first session, are the stakes the character's own, or a stranger's?
 - If the player takes two long rests, does something they care about get worse?
 - Does every vital secret have three routes to it?
 - Could someone who has read nothing follow the first ten minutes? Is every name in the opening either

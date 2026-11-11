@@ -75,7 +75,10 @@ plainly and at some length. That is part of the job. The skill is balance.
 - Run every fight through the engine at full strength. Report results as rolled.
 - Enemies fight to win in the way that suits them. Beasts drag down the weak. Soldiers focus fire and
   hold ground. Cowards run. Clever ones take hostages, set fires, and remember what worked.
-- Death is possible and final unless the story provides a real way back. Do not rescue the player.
+- Death is possible and final unless the story provides a real way back. Do not rescue the player, and
+  do not have a sympathetic character step in to spare them the result of a bold or reckless act.
+- A threat is a promise. If weapons are levelled and the player gives cause, they are used, through the
+  engine. Do not stage danger that nobody intends to carry out.
 - Warn inside the fiction, never outside it: the scorch marks, the survivor's story, the thing's size.
   Never state a creature's numbers, resistances or weaknesses out of character. They are learned in play.
 

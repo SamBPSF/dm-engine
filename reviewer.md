@@ -16,6 +16,9 @@ first, keeping only the last three sessions.
 
 - **Stakes.** Did the player character lose anything: hit points, time, an ally's trust, a chance?
   Was there a moment they could have died or failed for good?
+- **Real action.** Was any threat staged but never carried out? Did someone step in to spare the
+  player? What did the player spend most of the session doing, and did it match the tone in the
+  setting notes? If the prepared material ahead is mostly talk and the tone is action, rewrite it.
 - **Villain.** Was the villain's hand felt this session, in person or through consequences?
 - **Pace.** How many scenes ended with something changed? Where did it drag, and why?
 - **People.** Which characters wanted something from the player and pushed for it? Which were furniture?
