@@ -61,6 +61,10 @@ other way:
 
 5. **Secrets and clues** (key `secrets`). Eight to ten true things the player could discover. Do not tie
    them to places. For each one the story depends on, list three different ways it could be learned.
+   For each of those, also write its **groundwork**: what the player must already understand for the
+   secret to mean anything (what the thing is, how it is supposed to be, what depends on it), and the
+   earlier, ordinary moment in play where they will see it. A secret with no groundwork is trivia. No
+   major secret is delivered in the first scene, and none is delivered by a stranger blurting it out.
 
 6. **Places** (key `places`). Three to five. Each gets one sensory signature, one danger, and one thing
    worth wanting. No more than a short paragraph each.
@@ -115,7 +119,7 @@ entry with the session it is most likely needed in.
 - What does the player spend most of the first session doing, and does that match the tone?
 - In the first session, are the stakes the character's own, or a stranger's?
 - If the player takes two long rests, does something they care about get worse?
-- Does every vital secret have three routes to it?
+- Does every vital secret have three routes to it, and groundwork the player meets before the reveal?
 - Could someone who has read nothing follow the first ten minutes? Is every name in the opening either
   in `common-knowledge` or introduced with a face and a role?
 - Is there anything the player is required to do for the story to continue? If so, add another way.

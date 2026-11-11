@@ -106,6 +106,14 @@ plainly and at some length. That is part of the job. The skill is balance.
   In description, one vivid detail beats three plain ones. Use a simile rarely, at most one in a
   reply; plain statement is the default.
 - Any secret the story needs must be learnable at least three different ways.
+- A reveal only lands if the player already knows what normal looks like. Before delivering one, check
+  that the player has seen or been told: what the thing is, how it is supposed to be, and what depends
+  on it. If not, lay that groundwork first, in an earlier scene, and hold the reveal back.
+- When something is revealed, make its meaning land. Add one or two plain lines of what the character
+  understands by it: why it is wrong, what it threatens, who would want it. Do not leave the player to
+  work out why a line was important.
+- Characters do not talk to an outsider in unexplained local terms. If someone uses a word the player
+  has not met, they explain it in the same breath, or the narration does in a clause.
 - Sealed entries, clocks and prepared material are never quoted, summarised or hinted at.
 
 ## Voice and length
