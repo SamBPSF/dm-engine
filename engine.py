@@ -811,17 +811,22 @@ def list_campaigns() -> dict:
 
 def session_start(campaign: str) -> dict:
     m = _meta(campaign)
-    m["session"] += 1
+    records = _all(campaign, "record")
+    with _db() as con:
+        played = con.execute("SELECT COUNT(*) FROM log WHERE campaign=? AND ts>=?",
+                             (campaign, m.get("session_started", 0))).fetchone()[0]
+    # A session that was opened but never played or ended (for example during prep) is reused, not counted.
+    stray = m["session"] > 0 and str(m["session"]) not in records and played == 0
+    if not stray:
+        m["session"] += 1
     m["session_damage"] = 0
     m["session_started"] = time.time()
     _put(campaign, "meta", "meta", m)
     ents = _all(campaign, "entity")
     ck = _get(campaign, "sealed", "common-knowledge")
-    if ck and not m.get("primer_given"):
+    if ck and not records:
         grounding = ("Before the first scene, give the player 'where you stand' from common_knowledge: who "
                      "they are, where and why, who is with them, what everyone knows. They have not had it yet.")
-        m["primer_given"] = True
-        _put(campaign, "meta", "meta", m)
     elif ck:
         grounding = "The player has been given the basics. Re-attach names to faces in the recap."
     else:

@@ -251,4 +251,18 @@ inv = g.create_campaign("dunes", "The Glass Dunes", description="Invent one: des
 assert inv["setting_notes"]["table_rules"] == ["I roll my own dice."] and "None yet" in inv["character"]
 assert "invent the world" in g.author_brief("dunes")["procedure"]
 
+# a session opened during prep and never played is not counted, and the briefing is still owed
+C8 = "stray"
+g.upsert_entity(C8, "Vilik", "pc", {"max_hp": 40, "ac": 15})
+assert g.session_start(C8)["session"] == 1
+g.seal(C8, "common-knowledge", "You are Vilik.")
+again = g.session_start(C8)
+assert again["session"] == 1 and "where you stand" in again["grounding"]
+g.apply_damage(C8, "Vilik", 5)
+g.session_end(C8, "Played.", [])
+later = g.session_start(C8)
+assert later["session"] == 2 and "has been given the basics" in later["grounding"]
+g.apply_damage(C8, "Vilik", 5)
+assert g.session_start(C8)["session"] == 3
+
 print("all engine checks passed")
