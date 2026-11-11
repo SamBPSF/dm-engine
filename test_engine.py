@@ -523,4 +523,18 @@ token = link["link"].rsplit("/", 1)[1]
 assert link["shelf"] == "ravenloft" and g.upload_ticket(token) == "ravenloft" and g.upload_ticket("nope") is None
 assert "~lore" not in g._campaign_names(include_hidden=True)
 
+
+# newer tools are reachable through open_sealed for chats with an out-of-date tool list
+assert g.open_sealed(CC, 'call: lore_search {"query": "darklord prison"}')["results"]
+assert g.open_sealed(CC, "upload link")["shelf"] == "ravenloft"
+assert g.open_sealed(CC, 'call: set_condition {"target": "Vilik", "condition": "prone", "active": true, "rounds": 1}')["rounds_left"] == 1
+assert "rating" in g.open_sealed(CC, 'call: encounter_check {"enemies": ["Brute"]}')
+for bad in ("call: restore_campaign {}", "call: encounter_check {oops}", 'call: encounter_check {"nope": 1}'):
+    try:
+        g.open_sealed(CC, bad)
+        raise AssertionError("bad call accepted: " + bad)
+    except g.GameError:
+        pass
+assert "open_sealed" in g.session_start(CC)["if_a_tool_is_missing"]
+
 print("all engine checks passed")

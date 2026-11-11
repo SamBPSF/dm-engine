@@ -1663,16 +1663,50 @@ def seal(campaign: str, key: str, content: str, tags: list[str] | None = None) -
     return {"sealed": key, "characters": len(content)}
 
 
+MISSING_TOOL = ("Claude can take a day to notice tools added to this engine. If a tool named in these "
+                "instructions is not in your tool list, reach it through open_sealed with the key "
+                "'call: <tool name> <arguments as JSON>', for example: call: encounter_check "
+                '{"enemies": ["Raider", "Raider"]}. The campaign is filled in for you.')
+
+
+def _call_by_name(campaign: str, text: str) -> dict:
+    import inspect
+    reachable = {f.__name__: f for f in (
+        concentrate, encounter_check, resolve_attack, set_condition, saving_throw, lore_search, lore_shelf,
+        lore_upload_link, lore_add, lore_remove, list_backups, archive_campaign, campaign_setup_guide,
+        create_campaign, use_resource)}
+    m = re.match(r"\s*(\w+)\s*(\{.*\})?\s*$", text, re.S)
+    if not m or m.group(1) not in reachable:
+        raise GameError("Use 'call: <tool> <JSON arguments>'. Reachable this way: " + ", ".join(sorted(reachable)) + ".")
+    fn = reachable[m.group(1)]
+    try:
+        args = json.loads(m.group(2) or "{}")
+    except ValueError as ex:
+        raise GameError(f"The arguments are not valid JSON: {ex}")
+    params = list(inspect.signature(fn).parameters)
+    if params and params[0] in ("campaign", "name", "setting") and params[0] not in args:
+        args[params[0]] = campaign
+    try:
+        return fn(**args)
+    except TypeError as ex:
+        raise GameError(f"Wrong arguments for {m.group(1)}: {ex}. It takes: {', '.join(params)}.")
+
+
 def sealed_index(campaign: str) -> dict:
     items = _all(campaign, "sealed")
     return {"entries": [{"key": v["key"], "tags": v["tags"]} for v in items.values()]}
 
 
 def open_sealed(campaign: str, key: str) -> dict:
-    if key.lower().startswith("search:"):        # for chats that do not have lore_search yet
-        return lore_search(campaign, key[7:])
-    if key.lower().strip() == "shelf":
+    low = key.lower().strip()
+    if low.startswith("call:"):                   # any newer tool, for chats whose tool list is out of date
+        return _call_by_name(campaign, key.strip()[5:])
+    if low.startswith("search:"):
+        return lore_search(campaign, key.strip()[7:])
+    if low == "shelf":
         return lore_shelf(campaign)
+    if low == "upload link":
+        return lore_upload_link(campaign)
     s = _get(campaign, "sealed", _slug(key))
     if s is None:
         raise GameError(f"No sealed entry '{key}'. Call sealed_index to see the keys.")
@@ -1711,6 +1745,7 @@ def author_brief(campaign: str) -> dict:
         "open_threads": m["open_threads"],
         "recent_events": recent_log(campaign, 60)["log"],
         "secrecy": "Nothing you read or write here may appear in your visible replies.",
+        "if_a_tool_is_missing": MISSING_TOOL,
     }
 
 
@@ -1789,6 +1824,7 @@ def campaign_setup_guide() -> dict:
                              for e in _saved_characters().values()],
         "saved_table_rules": rules,
         "existing_campaigns": _campaign_names(include_hidden=True),
+        "if_a_tool_is_missing": MISSING_TOOL,
     }
 
 
@@ -1922,6 +1958,7 @@ def session_start(campaign: str) -> dict:
                           "running the Reviewer after this session."
                           if m["session"] > 1 and m.get("last_reviewed", 0) < m["session"] - 1 else "Up to date."),
         "reminder": "Clocks and sealed entries are hidden from the player. Never show them.",
+        "if_a_tool_is_missing": MISSING_TOOL,
     }
 
 
@@ -1973,6 +2010,7 @@ def reviewer_brief(campaign: str) -> dict:
         "player_feedback": _get(campaign, "feedback", "all", []),
         "world_hours": round(m["world_hours"], 1),
         "secrecy": "Nothing you read or write here may appear in your visible replies.",
+        "if_a_tool_is_missing": MISSING_TOOL,
     }
 
 
