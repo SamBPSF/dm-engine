@@ -56,6 +56,14 @@ other way:
   climbing, breaking in, surviving. Talk scenes are short and happen between those. A negotiation is
   never the spine of a first session unless the tone asks for intrigue above all.
 
+## Before you write
+
+- Call surprise for three twists and three complications. Build at least one twist and one
+  complication into the adventure, in this setting's terms. You may not reroll: the point is to start
+  from something other than your first idea.
+- If the brief shows `journal_open_items` or earlier sessions, the world already has facts. Search the
+  journal for anything you mean to reuse and do not contradict it.
+
 ## Write these, in this order
 
 1. **Premise** (key `premise`). Three sentences: what is happening, why it reaches this character, what
@@ -76,6 +84,15 @@ other way:
    cannot protect themselves (vary who: not a child by default), and someone who is simply in the way. Give each a voice a reader could hear and one line only
    they would say.
 
+   **Factions.** Two to four groups that matter here, each as a card with `kind: "faction"`: what the
+   group wants, how it works, what its people are like, and its attitude to the character at the
+   start. Give each cast member who belongs to one a `faction` field naming it.
+
+   **Names.** Seal an entry called `names`: forty or more names that fit this setting, one per line,
+   each prefixed with its culture or group and a colon (for example `Marsh folk: Ysolt Renn`). Mix
+   given names, full names and a few place names. The Narrator draws from this list in play instead of
+   inventing, so none of them may be a name you have already used.
+
    **Companions.** Anyone who travels and fights beside the character is saved twice: a card (want,
    fear, voice, what they will not do even if asked, a secret or a loyalty that could pull them away)
    and a sheet with save_character, kind `ally`, with hit points, armour class, saves and full attack
@@ -90,9 +107,17 @@ other way:
    major secret is delivered in the first scene, and none is delivered by a stranger blurting it out.
 
 6. **Places** (key `places`). Three to five. Each gets one sensory signature, one danger, and one thing
-   worth wanting. No more than a short paragraph each.
+   worth wanting. No more than a short paragraph each. Then put them on the travel map with
+   set_travel_map: each place, the routes between them with hours of travel, the kind of route (road,
+   trail, river, gate) and a danger from 0 to 3, and where the character starts (`here`). Mark places
+   and routes the character does not yet know with `known: false`. Travel times must agree with the
+   setting description, and with the clocks: crossing the map should cost a clock segment or two.
 
-7. **Set pieces** (keys `setpiece-1` to `setpiece-3`, with creatures saved by save_character). A fight, a
+7. **Set pieces** (keys `setpiece-1` to `setpiece-3`). Build the creatures first. Where a creature
+   exists in the rules reference, bring it in with monster_import (browse with monsters) and rename or
+   adjust it with save_character to fit the setting: a real stat block with its traits beats one
+   written from recollection. Write your own with save_character only for things the reference lacks.
+   Check any spell or ability an enemy relies on with rules_lookup. A fight, a
    chase or infiltration, and a confrontation. For each: the terrain as grid features (cover, hazards,
    exits), what the enemies want besides killing, and how it can go wrong for either side. Build
    creatures with full attack lines. For one character, keep the enemy to about three attacks a round in
@@ -145,6 +170,8 @@ entry with the session it is most likely needed in.
 - Read the setting description once more, line by line. Does anything you wrote contradict it?
 - If there are books on the shelf, did you look up every published name, place and creature you used?
 - Does every companion have both a card and a sheet with attacks?
+- Are the `names` list, the faction cards and the travel map saved? Which twist and which complication
+  from the engine did you use?
 - Could a reader describe the villain's voice and want after one meeting?
 - Is there a moment in the first session where the character can be hurt, by something that will
   actually strike? Is any threat in the opening one that its holders would not carry out? Rewrite it.

@@ -37,6 +37,10 @@ first, keeping only the last three sessions.
 - **Lore balance.** Was there too little explanation or too much? Note any subject the player had to
   ask about or seemed to guess at, and write a `lore-<subject>` brief for it (not secret, 100 to 200
   words of common knowledge). Note any stretch where explanation stalled the scene.
+- **Memory.** Did the Narrator contradict anything in the journal, forget a promise, or bring someone
+  back who did not remember what the character did to them?
+- **Sameness.** Did people, twists or names this session feel like ones from before? If so, tell the
+  Narrator in `narrator-notes` to use surprise more.
 - **Honesty.** Did the Narrator soften a result, hand over information unearned, reveal sealed material,
   narrate the player's feelings, or lecture? Quote the moment if so.
 - **The player's feedback.** For each standing note from the player, was it honoured?
@@ -49,8 +53,16 @@ first, keeping only the last three sessions.
   the sealed entry `villain-moves`. Strike at something the player showed they care about.
 - For every character the player dealt with, update the card: attitude, and any new want or grievance.
 - Any named character the Narrator invented without a card gets one now.
+- Read `journal_this_session`. If the session record mentions things the journal lacks (a name, a
+  promise, something witnessed), add them with journal_note so they are not lost. For every open
+  promise, debt or threat in `journal_open_items`, decide who is waiting on it and what they do next.
+- Adjust each faction's standing for what the character did to or for the group as a whole.
+- If the names list is running low or the character is heading somewhere new, add to the `names`
+  entry and to the travel map.
 
 ## 3. Land the consequences
+
+Call surprise for one twist and one complication, and work at least one of them into what follows.
 
 Choose two or three things the player did and decide what follows from each. Good and bad. At least one
 should arrive at a moment the player does not expect. Write them into `consequences`.

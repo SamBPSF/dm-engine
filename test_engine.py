@@ -565,6 +565,172 @@ assert "~library" not in g._campaign_names(include_hidden=True)
 assert g.open_sealed(CC, 'call: character_library {}')["characters"]
 assert "changed" not in g.open_sealed(C7, 'call: library_save {"name": "Vilik", "from_campaign": "this"}')
 
+# journal: what play establishes, who it concerns, what is still owed
+CJ = "journal"
+g.set_setting_notes(CJ, "Testland", "test")
+g.upsert_entity(CJ, "Vilik", "pc", {"max_hp": 60, "ac": 15})
+g.session_start(CJ)
+r = g.journal_note(CJ, [
+    {"text": "The ferryman Odd Harl saw Vilik take the ledger from the customs house.", "about": ["Odd Harl", "customs house"]},
+    {"text": "Vilik promised Sister Maren he would bring her brother's ring back from the marsh.", "about": ["Sister Maren"], "kind": "promise"},
+    {"text": "Odd Harl is paid by the Salt Guild to report strangers.", "about": ["Odd Harl", "Salt Guild"], "secret": True},
+])
+assert r["saved"] == [1, 2, 3] and r["still_open"] == 1
+assert [e["n"] for e in g.journal_search(CJ, about="Odd Harl")["entries"]] == [3, 1]
+pv = g.journal_search(CJ, about="odd harl", player_view=True)
+assert [e["n"] for e in pv["entries"]] == [1] and "does not know" in pv["instruction"]
+assert g.journal_search(CJ, query="ring marsh")["entries"][0]["n"] == 2
+assert g.session_start(CJ)["open_promises_debts_threats"][0]["n"] == 2
+g.save_card(CJ, "Odd Harl", {"want": "to be left alone"})
+assert len(g.get_card(CJ, "Odd Harl")["remembers_from_play"]) == 2          # people remember
+g.journal_note(CJ, {"text": "Vilik returned the ring to Sister Maren.", "about": ["Sister Maren"], "closes": 2})
+assert g.session_start(CJ)["open_promises_debts_threats"] == []
+assert g.journal_search(CJ, about="Sister Maren")["entries"][1]["outcome"].startswith("Vilik returned")
+for bad in ([{"text": ""}], [{"text": "x", "kind": "gossip"}], [{"text": "x", "closes": 99}]):
+    try:
+        g.journal_note(CJ, bad)
+        raise AssertionError("bad journal note accepted")
+    except g.GameError:
+        pass
+assert "journal" not in g.session_end(CJ, "s", [])                          # this session has entries
+g.session_start(CJ)
+assert "journal_note" in g.session_end(CJ, "s", [])["journal"]              # an empty session is nudged
+assert len(g.reviewer_brief(CJ)["journal_this_session"]) == 0 and "journal_open_items" in g.author_brief(CJ)
+
+# factions: a group's standing is where its members start, and moves those with no history of their own
+g.save_card(CJ, "Salt Guild", {"kind": "faction", "want": "the river trade, all of it", "attitude": "wary"})
+g.save_card(CJ, "Weigher Pell", {"faction": "Salt Guild", "want": "a quiet shift"})
+g.save_card(CJ, "Factor Brisa", {"faction": "Salt Guild", "want": "Pell's job", "attitude": "warm"})
+assert g.get_card(CJ, "Weigher Pell")["attitude"] == "wary"
+assert g.get_card(CJ, "Weigher Pell")["faction_standing"]["faction"] == "Salt Guild"
+g.adjust_attitude(CJ, "Factor Brisa", 1, "Vilik tipped her off about the audit.")
+moved = g.adjust_attitude(CJ, "Salt Guild", -2, "Vilik burned the tally house.")
+assert moved["attitude"] == "hostile" and moved["members_who_followed"] == ["Weigher Pell"]
+assert g.get_card(CJ, "Weigher Pell")["attitude"] == "hostile" and g.get_card(CJ, "Factor Brisa")["attitude"] == "friendly"
+start = g.session_start(CJ)
+assert [f["name"] for f in start["factions"]] == ["Salt Guild"] and "Salt Guild" not in [c["name"] for c in start["cast"]]
+assert len(g.get_card(CJ, "Salt Guild")["members"]) == 2
+
+# surprise tables: no repeats until a table is used up; names come from the campaign's own list
+seen = set()
+for _ in range(10):
+    got = g.surprise(CJ, "complication", 3)["results"]
+    assert len(got) == 3 and not (set(got) & seen)
+    seen |= set(got)
+assert len(seen) == 30 and len(g.surprise(CJ, "complication", 2)["results"]) == 2    # table resets when empty
+assert " | " in g.surprise(CJ, "person")["results"][0]
+g.seal(CJ, "names", "Marsh folk:\n- Marsh: Ysolt Renn\n- Marsh: Dab Corrow\nGuild:\n- Guild: Tessaly Orn")
+assert g.surprise(CJ, "name", about="guild")["names"] == ["Tessaly Orn"]
+two = g.surprise(CJ, "name", 2)
+assert sorted(two["names"]) == ["Dab Corrow", "Ysolt Renn"] and "note" not in two
+assert "note" in g.surprise(CJ, "name")                                     # list used up: generated, and says so
+for _ in range(40):
+    r = g.surprise(CJ, "reaction", about="Weigher Pell")                     # hostile: -3 on 2d6
+    assert not r["result"].startswith("generous")
+try:
+    g.surprise(CJ, "banana")
+    raise AssertionError("unknown surprise kind accepted")
+except g.GameError:
+    pass
+
+# areas and cover on the grid
+g.upsert_entity(CJ, "Raider", "creature", {"max_hp": 500, "ac": 13, "attacks": [{"name": "Bow", "to_hit": 5, "damage": "1", "type": "piercing"}]})
+g.upsert_entity(CJ, "Hound", "creature", {"max_hp": 20, "ac": 12, "attacks": [{"name": "Bite", "to_hit": 4, "damage": "1", "type": "piercing"}]})
+g.start_combat(CJ, ["Vilik", "Raider", "Hound"], {"Vilik": 30})
+g.set_battle_map(CJ, 12, 8, [{"kind": "cover", "label": "crates", "x": 5, "y": 2, "w": 1, "h": 2},
+                              {"kind": "wall", "label": "wall", "x": 5, "y": 6, "w": 1, "h": 2},
+                              {"kind": "hazard", "label": "fire", "x": 9, "y": 1}],
+                 {"Vilik": [1, 2], "Raider": [9, 2], "Hound": [9, 4]})
+toks = {t["name"]: t for t in g.battle_map(CJ)["map"]["tokens"]}
+assert toks["Raider"]["feet_from_you"] == 40 and "half cover" in toks["Raider"]["cover_from_you"]
+assert "half cover" in toks["Hound"]["cover_from_you"]                    # the crates are two squares tall
+assert not g.player_attack(CJ, "Vilik", "Raider", 14, 9, 5)["hit"]          # AC 13, +2 for the crates
+assert g.player_attack(CJ, "Vilik", "Raider", 15, 9, 5)["hit"]
+assert "half cover" in g.creature_attack(CJ, "Raider", "Vilik")["cover"]
+g.move_token(CJ, "Vilik", 4, 2)                                             # hugging the crates: they shelter Vilik, not the raider
+assert "cover" not in g.player_attack(CJ, "Vilik", "Raider", 13, 9, 1)
+assert "half cover" in g.creature_attack(CJ, "Raider", "Vilik")["cover"]
+g.move_token(CJ, "Vilik", 1, 7); g.move_token(CJ, "Raider", 9, 7)
+assert "+5 AC" in g.player_attack(CJ, "Vilik", "Raider", 14, 9, 1)["cover"]
+g.move_token(CJ, "Vilik", 1, 2); g.move_token(CJ, "Raider", 9, 2)
+blast = g.area(CJ, "sphere", 10, "J3")                                      # 10 ft radius on the raider
+assert {x["name"] for x in blast["inside"]} == {"Raider", "Hound"} and blast["hazards_inside"] == ["J2"]
+assert [x["name"] for x in g.area(CJ, "sphere", 5, "Raider")["inside"]] == ["Raider"]
+cone = g.area(CJ, "cone", 60, "Vilik", "Raider")
+assert {x["name"] for x in cone["inside"]} == {"Raider", "Hound"} and "Vilik" not in str(cone["inside"])
+assert [x["name"] for x in g.area(CJ, "line", 60, "Vilik", "J3")["inside"]] == ["Raider"]
+assert [x["name"] for x in g.area(CJ, "line", 30, "Vilik", "Raider")["inside"]] == []      # falls short
+assert sorted(x["name"] for x in g.area(CJ, "cube", 15, "J4")["inside"]) == ["Hound", "Raider"]
+for bad in (("sphere", 10, "Z99", ""), ("cone", 30, "Vilik", ""), ("blob", 10, "A1", "")):
+    try:
+        g.area(CJ, *bad)
+        raise AssertionError("bad area accepted")
+    except g.GameError:
+        pass
+g.end_combat(CJ)
+
+# travel map: routes cost time, time moves clocks, the road can interrupt
+g.set_travel_map(CJ, places=[{"name": "Shirerun", "note": "home"}, {"name": "Gatehouse"}, {"name": "Ixmar"},
+                             {"name": "The Sump", "known": False}],
+                 routes=[{"from": "Shirerun", "to": "Gatehouse", "hours": 2},
+                         {"from": "Gatehouse", "to": "Ixmar", "hours": 0.5, "kind": "gate"},
+                         {"from": "Shirerun", "to": "Ixmar", "hours": 40, "kind": "sea"},
+                         {"from": "Ixmar", "to": "The Sump", "hours": 3, "danger": 3, "known": False}],
+                 here="Shirerun")
+g.set_clock(CJ, "Tide", 4, ["a", "b", "c", "d"], hours_per_segment=1)
+w = g.session_start(CJ)["where"]
+assert w["here"] == "Shirerun" and [r["to"] for r in w["known_routes"]] == ["Gatehouse", "Ixmar"]
+before = g._meta(CJ)["world_hours"]
+trip = g.travel(CJ, "Ixmar")
+assert [x["to"] for x in trip["legs"]] == ["Gatehouse", "Ixmar"] and trip["hours"] == 2.5 and trip["arrived"]
+assert abs(g._meta(CJ)["world_hours"] - before - 2.5) < 0.001 and len(trip["consequences"]) == 2   # the clock moved twice
+assert "The Sump" not in [r["to"] for r in trip["onward"]]
+try:
+    g.travel(CJ, "The Sump")
+    raise AssertionError("travelled by a route the character does not know")
+except g.GameError:
+    pass
+g.set_travel_map(CJ, places=[{"name": "The Sump", "known": True}],
+                 routes=[{"from": "Ixmar", "to": "The Sump", "hours": 3, "danger": 3, "known": True}])
+events = 0
+for _ in range(30):                                                         # danger 3: the road interrupts about half the time
+    trip = g.travel(CJ, "The Sump")
+    assert trip["arrived"]
+    events += "event" in trip
+    assert g.travel(CJ, "Ixmar")["now_at"] == "Ixmar"
+assert 4 < events < 27, events
+
+# rules shelf and monster import
+assert g.rules_ready()
+hit = g.rules_lookup("fireball")["results"][0]
+assert hit["where"] == "Fireball" and "8d6" in hit["text"] and hit["book"] == "SRD Spells"
+assert any("Grappl" in r["where"] for r in g.rules_lookup("how does grappling work", book="glossary")["results"])
+assert g.rules_lookup("zzyzx")["results"] == [] and g.rules_ready()         # second call is a no-op
+low = g.monsters(type="undead", cr_max=1)
+assert low["matching"] >= 3 and all(m["cr"] <= 1 for m in low["monsters"]) and "Ghoul" in [m["name"] for m in low["monsters"]]
+imp = g.monster_import(CJ, "ghoul", names=["Ghoul A", "Ghoul B"])
+assert imp["as"] == ["Ghoul A", "Ghoul B"] and imp["hp"] == 22 and imp["attacks_per_round"] == 2
+gh = g.get_entity(CJ, "Ghoul A")
+assert gh["kind"] == "creature" and gh["ac"] == 12 and gh["immune"] == ["poison"] and gh["saves"]["dex"] == 2
+bite = next(a for a in gh["attacks"] if a["name"] == "Bite")
+assert bite["to_hit"] == 4 and bite["damage"] == "1d6+2+1d6" and bite["type"] == "piercing"
+claw = next(a for a in gh["attacks"] if a["name"] == "Claw")
+assert "Paralyzed" in claw["rider"] and "DC 10" in claw["rider"]
+drag = g.monster_import(CJ, "Adult Red Dragon")
+assert "Fire Breath" in drag["other_actions"] and g.get_entity(CJ, "Adult Red Dragon")["saves"]["dex"] == 6
+assert g.encounter_check(CJ, ["Ghoul A", "Ghoul B"])["rating"] in ("light", "fair", "dangerous", "deadly")
+try:
+    g.monster_import(CJ, "dragon")
+    raise AssertionError("an ambiguous monster name was accepted")
+except g.GameError as ex:
+    assert "Close:" in str(ex)
+assert "rules" not in [c for c in g._campaign_names(include_hidden=True)]
+for mm in g._all_monsters():                                                # every monster converts cleanly
+    sh = g._monster_sheet(mm)
+    assert sh["max_hp"] > 0 and sh["ac"] > 0
+    for a in sh["attacks"]:
+        g.roll_expr(a["damage"])
+
 # newer tools are reachable through open_sealed for chats with an out-of-date tool list
 assert g.open_sealed(CC, 'call: lore_search {"query": "darklord prison"}')["results"]
 assert g.open_sealed(CC, "upload link")["shelf"] == "ravenloft"

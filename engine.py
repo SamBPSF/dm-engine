@@ -666,13 +666,17 @@ def creature_attack(campaign: str, attacker: str, target: str, attack_name: str 
     nat, detail = _d20(mode)
     tired = 2 * _exhaustion(a)
     total = nat + int(atk.get("to_hit", 0)) - tired
-    hit = nat == 20 or (nat != 1 and total >= t["ac"])
+    cover, cover_why = _cover(campaign, a, t)
+    ac = t["ac"] + cover
+    hit = nat == 20 or (nat != 1 and total >= ac)
     crit = nat == 20 or (hit and auto_crit)
     out: dict[str, Any] = {
         "attacker": a["name"], "attack": atk["name"],
         "roll": f"{detail} + {atk.get('to_hit', 0)}" + (f" - {tired} exhaustion" if tired else "") + f" = {total}",
         "hit": hit, "critical": crit,
     }
+    if cover:
+        out["cover"] = f"{t['name']} has {cover_why}."
     if why:
         out["rolled_with"] = f"{mode if mode != 'none' else 'a straight roll (advantage and disadvantage cancel)'}: " + "; ".join(why)
     if notes:
@@ -684,7 +688,7 @@ def creature_attack(campaign: str, attacker: str, target: str, attack_name: str 
     if t["kind"] == "pc":
         out["tell_player"] = f"{a['name']} rolls {total} to hit."
     turners = [r["name"] for r in t.get("reactions", [])
-               if hit and not crit and total < t["ac"] + int(r.get("ac_bonus", 0))]
+               if hit and not crit and total < ac + int(r.get("ac_bonus", 0))]
     if turners and t["kind"] == "pc" and t["hp"] > 0:
         _put(campaign, "attack", "pending", {"attacker": a["id"], "target": t["id"], "atk": atk,
                                               "roll": out["roll"]})
@@ -710,8 +714,11 @@ def player_attack(campaign: str, attacker: str, target: str, attack_total: int,
     """The player rolled. The engine checks it against the target's AC and applies the damage."""
     a, t = _entity(campaign, attacker), _entity(campaign, target)
     crit = natural_roll == 20
-    hit = crit or (natural_roll != 1 and attack_total >= t["ac"])
+    cover, cover_why = _cover(campaign, a, t)
+    hit = crit or (natural_roll != 1 and attack_total >= t["ac"] + cover)
     out: dict[str, Any] = {"attacker": a["name"], "hit": hit, "critical": crit}
+    if cover:
+        out["cover"] = f"{t['name']} has {cover_why}."
     mode, why, auto_crit, notes = _attack_mode(campaign, a, t)
     if hit:
         out.update(apply_damage(campaign, t["id"], damage, damage_type, a["name"], crit=crit))
@@ -872,6 +879,11 @@ def next_turn(campaign: str) -> dict:
                               "wait to be told. Resolve attacks with creature_attack. One line of narration.")
     else:
         out["attacks_available"] = [a["name"] for a in e["attacks"]]
+        if e.get("multiattack"):
+            out["routine"] = e["multiattack"]
+        extras = [x["name"] for key in ("other_actions", "bonus_actions", "legendary_actions") for x in e.get(key, [])]
+        if extras:
+            out["also_on_its_sheet"] = extras
         out["instruction"] = ("Decide what this creature does from its own goals, then resolve attacks with "
                               "creature_attack. Enemies fight to win and target whoever it makes sense to target.")
     return out
@@ -1053,6 +1065,15 @@ def battle_map(campaign: str) -> dict:
         tokens.append({"name": e["name"], "kind": e["kind"], "x": xy[0], "y": xy[1], "square": _label(*xy),
                        "status": _status(e), "size": e.get("size", "medium")})
     _codes(tokens)
+    pc_id = next((id for id in m["positions"] if (_get(campaign, "entity", id) or {}).get("kind") == "pc"), None)
+    if pc_id:
+        pc = _get(campaign, "entity", pc_id)
+        for t in tokens:
+            if t["kind"] != "pc":
+                t["feet_from_you"] = _feet(m["positions"][pc_id], [t["x"], t["y"]])
+                bonus, why = _cover(campaign, pc, _get(campaign, "entity", _slug(t["name"])))
+                if bonus:
+                    t["cover_from_you"] = why
     feats = []
     for f in m["features"]:
         f = {"kind": "other", "w": 1, "h": 1, **f}
@@ -1141,6 +1162,9 @@ def encounter_check(campaign: str, enemies: list[str], allies: list[str] | None 
     if swings > 3 + 2 * len(friends):
         out["warning"] = (f"{swings} enemy attacks a round against {1 + len(friends)} on the player's side. One "
                           "character cannot answer that many; use fewer, heavier enemies.")
+    if outgoing <= 0:
+        out["warning"] = ("No attacks are written on the player's side's sheets, so this rating assumes they deal "
+                          "no damage and is not meaningful. Add the character's attacks with save_character first.")
     return out
 
 
@@ -1178,8 +1202,13 @@ ATTITUDES = ["hostile", "unfriendly", "wary", "neutral", "warm", "friendly", "de
 def save_card(campaign: str, name: str, card: dict) -> dict:
     """A character card: want, voice, secret, signature_line, attitude, notes. Fields merge."""
     id = _slug(name)
+    is_new = _get(campaign, "card", id) is None
     c = _get(campaign, "card", id, {"name": name, "attitude": "neutral", "history": []})
     c.update({k: v for k, v in card.items() if k != "history"})
+    if is_new and "attitude" not in card:             # a new member starts where their faction stands
+        faction = _faction_of(campaign, c)
+        if faction:
+            c["attitude"] = faction["attitude"]
     if c["attitude"] not in ATTITUDES:
         raise GameError(f"attitude must be one of: {', '.join(ATTITUDES)}.")
     _put(campaign, "card", id, c)
@@ -1191,7 +1220,19 @@ def get_card(campaign: str, name: str) -> dict:
     if c is None:
         known = ", ".join(v["name"] for v in _all(campaign, "card").values()) or "none yet"
         raise GameError(f"No card for '{name}'. Known: {known}. Create one with save_card before voicing them.")
-    return {**c, "instruction": "Play the want, the voice and the secret. Never state the secret outright."}
+    out = {**c, "instruction": "Play the want, the voice and the secret. Never state the secret outright."}
+    faction = _faction_of(campaign, c)
+    if faction:
+        out["faction_standing"] = {"faction": faction["name"], "attitude": faction["attitude"],
+                                   "wants": faction.get("want", "")}
+    if c.get("kind") == "faction":
+        out["members"] = [f"{x['name']} ({x['attitude']})" for x in _members(campaign, c)]
+        out["instruction"] = ("A group, not a person. Its attitude is where its members start, and how its "
+                              "strangers treat the character.")
+    mem = [_jline(e) for e in _journal(campaign) if _about(e, c["name"])][-8:]
+    if mem:
+        out["remembers_from_play"] = mem
+    return out
 
 
 def adjust_attitude(campaign: str, name: str, steps: int, reason: str) -> dict:
@@ -1204,7 +1245,18 @@ def adjust_attitude(campaign: str, name: str, steps: int, reason: str) -> dict:
     c["history"] = (c.get("history", []) + [reason])[-12:]
     _put(campaign, "card", id, c)
     _log(campaign, "attitude", f"{c['name']} is now {c['attitude']}: {reason}")
-    return {"name": c["name"], "attitude": c["attitude"], "remembers": c["history"]}
+    out = {"name": c["name"], "attitude": c["attitude"], "remembers": c["history"]}
+    if c.get("kind") == "faction":                    # members with no history of their own move with the group
+        moved = []
+        for mem in _members(campaign, c):
+            if not mem.get("history"):
+                j = max(0, min(len(ATTITUDES) - 1, ATTITUDES.index(mem["attitude"]) + steps))
+                mem["attitude"] = ATTITUDES[j]
+                _put(campaign, "card", _slug(mem["name"]), mem)
+                moved.append(mem["name"])
+        out["members_who_followed"] = moved
+        out["note"] = "Word travels. Members the character has dealt with personally keep their own view."
+    return out
 
 
 # ------------------------------------------------------- time and clocks
@@ -1452,8 +1504,9 @@ def _library_drift(campaign: str) -> str | None:
 
 LORE_PATH = os.path.join(DATA_DIR, "lore.db")
 UPLOAD_DIR = os.path.join(DATA_DIR, "uploads")
-_STOP = set("a an and are as at be but by do for from has have how i in is it its of on or that the their "
-            "there this to was what when where which who whom why will with".split())
+_STOP = set("a about an and are as at be but by can do does for from has have how i in is it its of on or "
+            "rule rules tell that the their there this to was what when where which who whom why will with "
+            "work works".split())
 
 
 def _lore_db() -> tuple[sqlite3.Connection, bool]:
@@ -1466,8 +1519,13 @@ def _lore_db() -> tuple[sqlite3.Connection, bool]:
         """
     )
     try:
-        con.execute("CREATE VIRTUAL TABLE IF NOT EXISTS lore USING fts5("
-                    "shelf UNINDEXED, book UNINDEXED, place UNINDEXED, text, tokenize='porter unicode61')")
+        # Book titles and headings are searched too, and count for more than body text.
+        con.execute("CREATE VIRTUAL TABLE IF NOT EXISTS passages USING fts5("
+                    "shelf UNINDEXED, book, place, text, tokenize='porter unicode61')")
+        if con.execute("SELECT 1 FROM sqlite_master WHERE name='lore'").fetchone():   # the first layout
+            with con:
+                con.execute("INSERT INTO passages (shelf, book, place, text) SELECT shelf, book, place, text FROM lore")
+                con.execute("DROP TABLE lore")
         return con, True
     except sqlite3.OperationalError:
         con.execute("CREATE TABLE IF NOT EXISTS lore_plain (shelf TEXT, book TEXT, place TEXT, text TEXT)")
@@ -1538,12 +1596,13 @@ def _store_book(shelf: str, title: str, parts: list[tuple[str, str]], extra: dic
     title = " ".join(title.split())[:120]
     if not title:
         raise GameError("The book needs a title.")
-    chunks = _chunk(parts, by_section=not (extra or {}).get("pages"))
+    by_section = not (extra or {}).get("pages")
+    chunks = _chunk(parts, by_section=by_section)
     if not chunks:
         raise GameError(f"No readable text found in '{title}'.")
     slug = _slug(title)
     con, fts = _lore_db()
-    table = "lore" if fts else "lore_plain"
+    table = "passages" if fts else "lore_plain"
     with con:
         con.execute(f"DELETE FROM {table} WHERE shelf=? AND book=?", (shelf, title))
         con.executemany(f"INSERT INTO {table} (shelf, book, place, text) VALUES (?,?,?,?)",
@@ -1556,15 +1615,27 @@ def _store_book(shelf: str, title: str, parts: list[tuple[str, str]], extra: dic
     return rec
 
 
+_SUBHEADS = {"actions", "traits", "bonus actions", "reactions", "legendary actions", "overview", "description",
+             "notes", "tactics", "lair", "history", "appearance", "personality"}
+
+
 def _sections(text: str) -> list[tuple[str, str]]:
     """Split notes on markdown-style headings so each passage can say where it came from."""
     parts, place, buf = [], "", []
+    above: dict[int, str] = {}                           # the latest heading at each level
     for line in text.splitlines():
-        m = re.match(r"^\s{0,3}#{1,4}\s+(.+?)\s*#*\s*$", line)
+        m = re.match(r"^\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*$", line)
         if m:
             if buf:
                 parts.append((place, "\n".join(buf)))
-            place, buf = m.group(1)[:80], []
+            level, head = len(m.group(1)), m.group(2)[:80]
+            above = {k: v for k, v in above.items() if k < level}
+            if head.lower() in _SUBHEADS and above:      # 'Actions' means little without whose
+                place = f"{above[max(above)]}: {head}"[:80]
+            else:
+                place = head
+                above[level] = head
+            buf = []
         else:
             buf.append(line)
     if buf:
@@ -1673,7 +1744,8 @@ def lore_add_file(shelf: str, filename: str, path: str) -> dict:
 
 def _books(shelf: str) -> list[dict]:
     con, _ = _lore_db()
-    rows = con.execute("SELECT data FROM book WHERE shelf=? ORDER BY slug", (shelf,)).fetchall()
+    rows = con.execute("SELECT data FROM book WHERE shelf=? AND slug NOT LIKE '~%' ORDER BY slug",
+                       (shelf,)).fetchall()
     con.close()
     return [json.loads(r[0]) for r in rows]
 
@@ -1714,9 +1786,22 @@ def _shelf_summary(campaign: str) -> dict | None:
 def lore_search(name: str, query: str, book: str = "", limit: int = 5) -> dict:
     """Search the setting's books. name: the campaign (or a setting). Returns the best-matching passages."""
     shelf = _shelf_for(name)
-    books = _books(shelf)
-    if not books:
+    if not _books(shelf):
         raise GameError(f"There are no books on the '{shelf}' shelf. See lore_shelf.")
+    out = _search_shelf(shelf, query, book, limit)
+    if out["results"]:
+        out["how_to_use"] = ("Reference for you, not text for the player. Say what the character would know or "
+                             "can find out, in your own words; never paste or closely paraphrase a passage. "
+                             "Books hold secrets the character has not earned: keep those back. Setting notes "
+                             "win over the books where they differ.")
+    else:
+        out["note"] = ("Nothing on the shelf matches. Try a name or a different word. If the books do not "
+                       "cover it, decide it yourself in keeping with what they do say.")
+    return out
+
+
+def _search_shelf(shelf: str, query: str, book: str = "", limit: int = 5) -> dict:
+    books = _books(shelf)
     title = ""
     if book:
         title = next((b["title"] for b in books if _slug(book) in _slug(b["title"])), "")
@@ -1731,29 +1816,32 @@ def lore_search(name: str, query: str, book: str = "", limit: int = 5) -> dict:
         terms = [f'"{w}"' for w in words]
         if len(words) > 1:
             terms.insert(0, '"' + " ".join(words) + '"')        # the exact phrase scores on top
-        sql = "SELECT book, place, text FROM lore WHERE lore MATCH ? AND shelf=?"
+        sql = "SELECT book, place, text FROM passages WHERE passages MATCH ? AND shelf=?"
         args: list[Any] = [" OR ".join(terms), shelf]
         if title:
             sql += " AND book=?"
             args.append(title)
-        rows = con.execute(sql + " ORDER BY bm25(lore) LIMIT ?", args + [limit]).fetchall()
+        rows = con.execute(sql + " ORDER BY bm25(passages, 0.0, 3.0, 8.0, 1.0) LIMIT ?",
+                           args + [limit * 6]).fetchall()
     else:
         sql = "SELECT book, place, text FROM lore_plain WHERE shelf=?" + (" AND book=?" if title else "")
         found = con.execute(sql, [shelf] + ([title] if title else [])).fetchall()
-        scored = [(sum(r[2].lower().count(w) for w in words), r) for r in found]
-        rows = [r for n, r in sorted(scored, key=lambda x: -x[0]) if n][:limit]
+        scored = [(sum(r[2].lower().count(w) + 8 * r[1].lower().count(w) for w in words), r) for r in found]
+        rows = [r for n, r in sorted(scored, key=lambda x: -x[0]) if n][:limit * 6]
     con.close()
-    out: dict[str, Any] = {"shelf": shelf, "query": query, "results": [
+    # A heading that is exactly what was asked for comes first: 'Fireball' before 'Wand of Fireballs'.
+    asked = set(words)
+
+    def exact(row: tuple) -> int:
+        plain = re.sub(r"\[[^\]]*\]|\([^)]*\)", " ", row[1].lower())      # drop tags like [Condition] and prices
+        head = {w for w in re.findall(r"[^\W_]{2,}", plain) if w not in _STOP}
+        if not head:
+            return 2
+        return 0 if head == asked else 1 if head <= asked else 2
+
+    rows = sorted(rows, key=exact)[:limit]
+    return {"shelf": shelf, "query": query, "results": [
         {"book": b, "where": place, "text": text[:1700]} for b, place, text in rows]}
-    if rows:
-        out["how_to_use"] = ("Reference for you, not text for the player. Say what the character would know or "
-                             "can find out, in your own words; never paste or closely paraphrase a passage. "
-                             "Books hold secrets the character has not earned: keep those back. Setting notes "
-                             "win over the books where they differ.")
-    else:
-        out["note"] = ("Nothing on the shelf matches. Try a name or a different word. If the books do not "
-                       "cover it, decide it yourself in keeping with what they do say.")
-    return out
 
 
 def lore_remove(setting: str, title: str) -> dict:
@@ -1763,7 +1851,7 @@ def lore_remove(setting: str, title: str) -> dict:
         raise GameError(f"No book called '{title}' on the '{shelf}' shelf.")
     con, fts = _lore_db()
     with con:
-        con.execute(f"DELETE FROM {'lore' if fts else 'lore_plain'} WHERE shelf=? AND book=?", (shelf, hit["title"]))
+        con.execute(f"DELETE FROM {'passages' if fts else 'lore_plain'} WHERE shelf=? AND book=?", (shelf, hit["title"]))
         con.execute("DELETE FROM book WHERE shelf=? AND slug=?", (shelf, _slug(hit["title"])))
     con.close()
     return {"removed": hit["title"], "shelf": shelf}
@@ -1815,7 +1903,8 @@ def _call_by_name(campaign: str, text: str) -> dict:
         concentrate, encounter_check, resolve_attack, set_condition, saving_throw, lore_search, lore_shelf,
         lore_upload_link, lore_add, lore_remove, list_backups, archive_campaign, campaign_setup_guide,
         create_campaign, use_resource, character_library, library_save, library_retire,
-        library_restore_previous)}
+        library_restore_previous, journal_note, journal_search, surprise, area, set_travel_map, travel,
+        rules_lookup, monsters, monster_import)}
     m = re.match(r"\s*(\w+)\s*(\{.*\})?\s*$", text, re.S)
     if not m or m.group(1) not in reachable:
         raise GameError("Use 'call: <tool> <JSON arguments>'. Reachable this way: " + ", ".join(sorted(reachable)) + ".")
@@ -1881,6 +1970,8 @@ def author_brief(campaign: str) -> dict:
         "setting_notes": _get(campaign, "setting", "notes") or "None saved yet.",
         "established_in_this_setting": _established(campaign),
         "lore_shelf": _shelf_summary(campaign) or "No books on this setting's shelf.",
+        "journal_open_items": _open_items(campaign, 20),
+        "travel_map": _travel(campaign) if _travel(campaign)["places"] else "None yet.",
         "party": [e for e in ents.values() if e["kind"] in ("pc", "ally")],
         "creatures_on_file": [e["name"] for e in ents.values() if e["kind"] in ("npc", "creature")],
         "cast": list(_all(campaign, "card").values()),
@@ -2090,7 +2181,16 @@ def session_start(campaign: str) -> dict:
                     "next": c["steps"][c["filled"]] if c["filled"] < c["segments"] else "complete"}
                    for c in _all(campaign, "clock").values()],
         "sealed_keys": sealed_index(campaign)["entries"],
-        "cast": [{"name": c["name"], "attitude": c["attitude"]} for c in _all(campaign, "card").values()],
+        "cast": [{"name": c["name"], "attitude": c["attitude"]} for c in _all(campaign, "card").values()
+                 if c.get("kind") != "faction"],
+        "factions": [{"name": c["name"], "attitude": c["attitude"]} for c in _all(campaign, "card").values()
+                     if c.get("kind") == "faction"],
+        "open_promises_debts_threats": _open_items(campaign),
+        "journal": (f"{len(_journal(campaign))} entries. Record what play establishes with journal_note as "
+                    "scenes end. Look things up with journal_search rather than trusting your memory of "
+                    "earlier sessions."),
+        "where": _where_now(campaign) or "No travel map for this campaign.",
+        "rules": "The rules as written are on file: rules_lookup for spells, conditions, actions and items.",
         "playbook": PLAYBOOK,
         "grounding": grounding,
         "sheets": ("Full character sheets are on file. Call get_character for skills, saves, spells, features "
@@ -2128,6 +2228,10 @@ def session_end(campaign: str, summary: str, open_threads: list[str], record: st
     out = {"session": m["session"], "pc_damage_taken": m["session_damage"], "saved": True,
            "next": ("Ask the player whether to run the Reviewer now. If yes, call reviewer_brief in this "
                     "chat and follow its procedure without revealing anything.")}
+    if not any(e["session"] == m["session"] for e in _journal(campaign)):
+        out["journal"] = ("Nothing was written in the journal this session. Before you finish, record with "
+                          "journal_note what play established: names you invented, promises and debts, what "
+                          "people saw the character do, things given or taken. One call, several notes.")
     _library_backfill(campaign)
     drift = _library_drift(campaign)
     if drift:
@@ -2168,6 +2272,9 @@ def reviewer_brief(campaign: str) -> dict:
         "cast": list(_all(campaign, "card").values()),
         "sealed_keys": sealed_index(campaign)["entries"],
         "player_feedback": _get(campaign, "feedback", "all", []),
+        "journal_this_session": [_jline(e) for e in _journal(campaign) if e["session"] == m["session"]],
+        "journal_open_items": _open_items(campaign, 20),
+        "travel_map": _travel(campaign) if _travel(campaign)["places"] else "None yet.",
         "world_hours": round(m["world_hours"], 1),
         "secrecy": "Nothing you read or write here may appear in your visible replies.",
         "if_a_tool_is_missing": MISSING_TOOL,
@@ -2190,3 +2297,749 @@ def recent_log(campaign: str, limit: int = 40) -> dict:
             "SELECT kind, text FROM log WHERE campaign=? ORDER BY ts DESC LIMIT ?", (campaign, limit)
         ).fetchall()
     return {"log": [f"[{k}] {t}" for k, t in reversed(rows)]}
+
+
+# ---------------------------------------------------------------- journal
+#
+# What has been established in play: names invented at the table, promises, debts, what someone saw.
+# The Narrator adds to it as scenes end. Characters' cards pull their own entries, so people remember.
+
+JOURNAL_KINDS = ("fact", "promise", "debt", "threat", "rumour")
+_OPEN_KINDS = ("promise", "debt", "threat")
+
+
+def _journal(campaign: str) -> list[dict]:
+    return _get(campaign, "journal", "all", [])
+
+
+def journal_note(campaign: str, notes: list[dict]) -> dict:
+    """Record things established in play. Each note: text (one plain sentence), about (names of the
+    people, places or groups it concerns), kind (fact, promise, debt, threat or rumour), secret (true if
+    the player character does not know it), closes (the number of an open promise, debt or threat that
+    this note settles)."""
+    if isinstance(notes, dict):
+        notes = [notes]
+    if not notes:
+        raise GameError("Pass at least one note.")
+    j, m = _journal(campaign), _meta(campaign)
+    saved, closed = [], []
+    for raw in notes:
+        text = " ".join(str(raw.get("text", "")).split())[:500]
+        if not text:
+            raise GameError("Every note needs text: one plain sentence saying what is now true.")
+        kind = str(raw.get("kind", "fact")).lower()
+        if kind not in JOURNAL_KINDS:
+            raise GameError(f"kind must be one of: {', '.join(JOURNAL_KINDS)}.")
+        about = raw.get("about") or []
+        if isinstance(about, str):
+            about = [about]
+        n = (j[-1]["n"] + 1) if j else 1
+        entry = {"n": n, "session": m["session"], "hours": round(m["world_hours"], 1), "text": text,
+                 "about": [str(a).strip() for a in about if str(a).strip()][:8], "kind": kind,
+                 "secret": bool(raw.get("secret", False))}
+        if kind in _OPEN_KINDS:
+            entry["open"] = True
+        target = raw.get("closes")
+        if target:
+            hit = next((e for e in j if e["n"] == int(target)), None)
+            if hit is None or not hit.get("open"):
+                raise GameError(f"Entry {target} is not an open promise, debt or threat.")
+            hit["open"], hit["outcome"] = False, text
+            entry.pop("open", None)
+            closed.append(hit["n"])
+        j.append(entry)
+        saved.append(n)
+    _put(campaign, "journal", "all", j)
+    out: dict[str, Any] = {"saved": saved, "entries_in_journal": len(j)}
+    if closed:
+        out["closed"] = closed
+    still = [e for e in j if e.get("open")]
+    if still:
+        out["still_open"] = len(still)
+    return out
+
+
+def _about(entry: dict, who: str) -> bool:
+    s = _slug(who)
+    return any(s == _slug(a) or s in _slug(a) or _slug(a) in s for a in entry["about"] if _slug(a)) \
+        or (len(s) > 2 and s.replace("-", " ") in entry["text"].lower())
+
+
+def _jline(e: dict) -> dict:
+    out = {"n": e["n"], "session": e["session"], "text": e["text"], "about": e["about"], "kind": e["kind"]}
+    if e.get("secret"):
+        out["secret"] = True
+    if e.get("open"):
+        out["open"] = True
+    if e.get("outcome"):
+        out["outcome"] = e["outcome"]
+    return out
+
+
+def journal_search(campaign: str, query: str = "", about: str = "", player_view: bool = False,
+                   limit: int = 12) -> dict:
+    """Look up what has been established in play. about: a person, place or group. query: any words.
+    player_view: only what the player character knows, for answering 'what do I know about X?'."""
+    j = _journal(campaign)
+    found = [e for e in j if not (player_view and e.get("secret"))]
+    if about:
+        found = [e for e in found if _about(e, about)]
+    words = [w for w in re.findall(r"[^\W_]{3,}", query.lower()) if w not in _STOP]
+    if words:
+        scored = [(sum(e["text"].lower().count(w) + 2 * any(w in a.lower() for a in e["about"]) for w in words), e)
+                  for e in found]
+        found = [e for n, e in sorted(scored, key=lambda x: (-x[0], -x[1]["n"])) if n]
+    else:
+        found = found[::-1]
+    limit = max(1, min(int(limit), 40))
+    out: dict[str, Any] = {"entries": [_jline(e) for e in found[:limit]], "matching": len(found)}
+    if player_view:
+        out["instruction"] = ("This is what the character has learned in play. Answer from it, plus common "
+                              "knowledge. Where it runs out, say the character does not know. Do not fill the "
+                              "gap from sealed material.")
+    elif not found:
+        out["note"] = "Nothing recorded. If it was established in play, record it now with journal_note."
+    return out
+
+
+def _open_items(campaign: str, limit: int = 10) -> list[dict]:
+    return [_jline(e) for e in _journal(campaign) if e.get("open")][-limit:]
+
+
+# ----------------------------------------------------------------- factions
+
+def _faction_of(campaign: str, card: dict) -> dict | None:
+    name = card.get("faction")
+    return _get(campaign, "card", _slug(name)) if name else None
+
+
+def _members(campaign: str, faction: dict) -> list[dict]:
+    return [c for c in _all(campaign, "card").values()
+            if c.get("faction") and _slug(c["faction"]) == _slug(faction["name"])]
+
+
+# ---------------------------------------------------------- surprise tables
+#
+# Things the engine picks so that the Author and the Narrator do not always reach for their first idea.
+
+SURPRISES: dict[str, list[str]] = {
+    "complication": [
+        "Someone the character needs is not where they should be, and left in a hurry.",
+        "The obvious tool for the job is broken, missing or already in use by someone else.",
+        "A third party arrives who wants the same thing for a different reason.",
+        "It works, but loudly. Someone has heard.",
+        "The way back is cut off: a door, a tide, a crowd, a collapse.",
+        "An ally misunderstands and acts on the wrong plan.",
+        "The price has gone up since it was agreed, and the seller knows why it matters.",
+        "Weather, light or footing turns against whoever is winning.",
+        "Something the character carries is noticed, recognised and wanted.",
+        "A bystander is hurt or trapped, and only the character is close enough to help.",
+        "The enemy was expecting someone. Not the character, but someone.",
+        "A fire, a flood or a failing structure gives everything here a few minutes.",
+        "Authority shows up early and assumes the worst about what it sees.",
+        "The thing sought is here but is not what it was described as.",
+        "An old debt of the character's is called in at the worst moment.",
+        "Someone lies to protect a person the character has not met yet.",
+        "The character's own gear or magic fails in a small, specific way that will matter again.",
+        "A rival has been here first and left a message.",
+        "A companion is tempted by what they find.",
+        "What was meant to be guarded by one is guarded by several, or the reverse.",
+        "The locals close ranks: nobody saw anything and everybody is watching.",
+        "A wounded enemy begs for something reasonable.",
+        "The map, key or instructions are right but out of date.",
+        "Success here will be blamed on someone innocent unless the character prevents it.",
+        "An animal or a child has taken the important thing somewhere awkward.",
+        "Two people the character trusts give flatly opposite accounts.",
+        "The safe place is not safe tonight, for a reason that has nothing to do with the character.",
+        "Someone recognises the character from a story that is not quite true.",
+        "The clock is shorter than anyone said.",
+        "Help is offered by the last person the character wants to owe.",
+    ],
+    "twist": [
+        "The person asking for help caused the problem and does not know it.",
+        "The villain is right about one important thing.",
+        "Two enemies who seem allied are each planning to betray the other, soon.",
+        "The thing everyone is fighting over has already been replaced with a copy.",
+        "An ally is reporting to someone else, out of love rather than greed.",
+        "The victim does not want to be rescued, and has a reason.",
+        "The danger is real but aimed at someone other than everyone assumes.",
+        "What looks like the villain's plan is a cover for a smaller, more personal one.",
+        "The legend is true except for who the monster was.",
+        "A dead person is not dead, and has been busy.",
+        "The character's own side did something shameful here once, and the locals remember.",
+        "The lieutenant is the one with the conviction. The villain is tired.",
+        "The treasure is a debt: whoever holds it owes someone dangerous.",
+        "Someone thought to be a prisoner is in charge.",
+        "The cure and the cause come from the same source.",
+        "The enemy's weapon stops working if a particular person is harmed, and they know it.",
+        "A place believed abandoned has been lived in the whole time.",
+        "The message was meant for the character but written years ago.",
+        "The traitor was told to betray by someone on the character's side.",
+        "What the villain wants would help many people and ruin a few. The few are the ones in front of the character.",
+        "The monster is guarding something, not hunting.",
+        "An apparent accident was the first move of someone who has not appeared yet.",
+        "The rival wants the same outcome and will not share credit.",
+        "The safe route exists because someone keeps paying for it in a way nobody talks about.",
+    ],
+    "person": [
+        "talks while working and never looks up | wants a witness to something they are about to do",
+        "over-polite, counts everything twice | wants to leave this place for good and needs one more thing first",
+        "laughs at the wrong moments | wants someone else blamed before the truth comes out",
+        "very still, answers after a pause | wants news of a person who went the way the character came",
+        "treats every stranger as a customer | wants a rival ruined, cheaply",
+        "bitter about a promotion that went elsewhere | wants to be asked for their opinion",
+        "keeps touching a ring, charm or scar | wants forgiveness from someone who is not here",
+        "cheerful, hungry, owes money | wants a meal and one piece of luck",
+        "speaks for a master who is in the next room | wants the visitor gone before the master wakes",
+        "too young for the job and knows it | wants to do one thing right in front of somebody",
+        "devout in a way that makes others uneasy | wants a sign, and may decide the character is it",
+        "old soldier, bad knee, good memory | wants the names of the dead remembered correctly",
+        "smiles with the mouth only | wants to know who sent the character",
+        "collects small debts and never forgets one | wants a favour banked for later",
+        "frightened and hiding it with rules | wants someone else to make the decision",
+        "proud of a skill nobody here values | wants to be needed",
+        "newly arrived, asks too many questions | wants to find a place to belong before winter",
+        "grieving and practical about it | wants a body, a grave or a name",
+        "gossip with a ledger for a mind | wants one secret in exchange for each one given",
+        "drunk on a small authority | wants to be seen refusing someone important",
+        "calm because the worst has already happened | wants to finish one task and stop",
+        "quick hands, quicker apology | wants out from under whoever they work for",
+        "honest to the point of rudeness | wants a liar exposed",
+        "generous in public, careful in private | wants their good name kept clean at any cost",
+    ],
+    "activity": [
+        "eating, and unwilling to leave the meal",
+        "arguing among themselves about what to do with a captive or a find",
+        "wounded from an earlier fight and trying to hide it",
+        "waiting for someone, and it is not the character",
+        "moving something heavy and badly placed to defend themselves",
+        "searching for something they have lost",
+        "asleep, with one poor sentry",
+        "fleeing from something worse coming the same way",
+        "building, repairing or digging",
+        "performing a rite that must not be interrupted",
+        "following the character already, and have been for a while",
+        "trading with people the character would not expect them to know",
+        "guarding a wounded or young one of their own",
+        "lost, and too proud to say so",
+        "setting an ambush for someone else",
+        "celebrating, careless and loud",
+        "carrying a message, and in a hurry",
+        "burying their dead",
+    ],
+    "omen": [
+        "birds or vermin leaving in one direction",
+        "a bell, horn or drum where there should be none",
+        "the same stranger seen twice in places too far apart",
+        "water, milk or wine gone bad overnight",
+        "a child's rhyme that names something it should not know",
+        "tools laid out for a job nobody admits to planning",
+        "a familiar road that is shorter or longer than it was",
+        "animals refusing a threshold",
+        "a fresh mark over an old warning",
+        "lights where nobody lives",
+        "a locked door found open, with nothing taken",
+        "the smell of smoke with no fire",
+    ],
+}
+
+_REACTIONS = [(4, "hostile: refuses, threatens or acts against the character"),
+              (6, "unhelpful: wants them gone, gives nothing freely"),
+              (8, "guarded: will deal, but wants something first"),
+              (10, "helpful: gives what is asked, with a small price or condition"),
+              (99, "generous: helps beyond what was asked, and expects to be remembered")]
+_SYL_A = "al an ar bel bren cas dor el fen gar hal is jor kel lor mar ner or per quin ros sel tor ul ver wen yor zan".split()
+_SYL_B = "a e i o u ae ia en in on ar or el".split()
+_SYL_C = "bek den dra gan lis mir nor rak ren ric sa seth ta than vik wyn".split()
+
+
+def _names_left(campaign: str) -> list[str]:
+    entry = _get(campaign, "sealed", "names")
+    if not entry:
+        return []
+    used = set(_get(campaign, "surprise", "names_used", []))
+    names = [re.sub(r"^[-*\d.\s]+", "", ln).strip() for ln in entry["content"].splitlines()]
+    return [n for n in names if n and not n.endswith(":") and n not in used]
+
+
+def surprise(campaign: str, kind: str, count: int = 1, about: str = "") -> dict:
+    """Let the engine choose. kind: complication, twist, person, activity, omen, reaction or name.
+    about: for reaction, the character whose attitude applies; for name, a culture or group to draw from."""
+    kind = kind.lower().strip()
+    count = max(1, min(int(count), 6))
+    if kind == "reaction":
+        mod, who = 0, ""
+        if about:
+            card = _get(campaign, "card", _slug(about))
+            if card:
+                faction = _faction_of(campaign, card)
+                mod, who = ATTITUDES.index(card["attitude"]) - 3, card["name"]
+                if faction and not card.get("history"):
+                    mod = ATTITUDES.index(faction["attitude"]) - 3
+        dice = [_rng.randint(1, 6), _rng.randint(1, 6)]
+        total = sum(dice) + mod
+        result = next(text for top, text in _REACTIONS if total <= top)
+        _log(campaign, "surprise", f"reaction {who}: {dice} {mod:+d} = {total}: {result}")
+        return {"kind": "reaction", "roll": f"{dice[0]} + {dice[1]} {mod:+d} (attitude) = {total}", "result": result,
+                "instruction": "This is how they respond at first. Play it; good play can still change it."}
+    if kind == "name":
+        pool = _names_left(campaign)
+        if about:
+            pick = [n for n in pool if about.lower() in n.lower()]
+            pool = pick or pool
+        chosen = _rng.sample(pool, min(count, len(pool)))
+        made = []
+        while len(chosen) + len(made) < count:
+            made.append((_rng.choice(_SYL_A) + _rng.choice(_SYL_B) + _rng.choice(_SYL_C)).capitalize())
+        used = _get(campaign, "surprise", "names_used", []) + chosen
+        _put(campaign, "surprise", "names_used", used)
+        out: dict[str, Any] = {"kind": "name", "names": [n.split(":", 1)[-1].strip() for n in chosen] + made}
+        if made:
+            out["note"] = ("The campaign's own name list is empty or used up, so some of these are generic. "
+                           "Adjust them to the setting's sound.")
+        return out
+    if kind not in SURPRISES:
+        raise GameError("kind must be one of: " + ", ".join(sorted(SURPRISES) + ["name", "reaction"]) + ".")
+    table = SURPRISES[kind]
+    used = _get(campaign, "surprise", kind, [])
+    fresh = [i for i in range(len(table)) if i not in used]
+    if len(fresh) < count:
+        used, fresh = [], list(range(len(table)))
+    picks = _rng.sample(fresh, count)
+    _put(campaign, "surprise", kind, used + picks)
+    results = [table[i] for i in picks]
+    _log(campaign, "surprise", f"{kind}: " + " / ".join(results))
+    how = {"complication": "Fit this to the scene and make it happen now. Do not swap it for something gentler.",
+           "twist": "Build this into the adventure in the setting's own terms. It is a seed, not a script.",
+           "person": "Manner | what they want right now. Give them a name from surprise('name') and a face.",
+           "activity": "This is what they are doing when found. Let it shape how the meeting starts.",
+           "omen": "Show it once, plainly, without explaining it."}[kind]
+    return {"kind": kind, "results": results, "how_to_use": how}
+
+
+# ------------------------------------------------------- areas and cover
+
+def _feature_squares(m: dict, kinds: tuple[str, ...]) -> set[tuple[int, int]]:
+    out = set()
+    for f in m.get("features", []):
+        if f.get("kind", "other") in kinds:
+            x0, y0 = int(f.get("x", 0)), int(f.get("y", 0))
+            for dx in range(max(1, int(f.get("w", 1)))):
+                for dy in range(max(1, int(f.get("h", 1)))):
+                    out.add((x0 + dx, y0 + dy))
+    return out
+
+
+def _between(a: list[int], b: list[int]) -> list[tuple[int, int]]:
+    """Squares a straight line passes through, not counting the two ends."""
+    steps = max(abs(b[0] - a[0]), abs(b[1] - a[1]))
+    seen: list[tuple[int, int]] = []
+    for i in range(1, steps):
+        p = (round(a[0] + (b[0] - a[0]) * i / steps), round(a[1] + (b[1] - a[1]) * i / steps))
+        if p not in seen:
+            seen.append(p)
+    return seen
+
+
+def _feet(a: list[int], b: list[int]) -> int:
+    return 5 * max(abs(a[0] - b[0]), abs(a[1] - b[1]))
+
+
+def _cover(campaign: str, a: dict, t: dict) -> tuple[int, str]:
+    """Armour class bonus the target gets from what stands between, and why. (0, '') if none or unknown."""
+    s, m = _get(campaign, "combat", "combat"), _get(campaign, "map", "map")
+    if not s or not s.get("active") or not m:
+        return 0, ""
+    pa, pt = m["positions"].get(a["id"]), m["positions"].get(t["id"])
+    if pa is None or pt is None or _feet(pa, pt) <= 5:
+        return 0, ""
+    line = _between(pa, pt)
+    path = set(line)
+    if path & _feature_squares(m, ("wall",)):
+        return 5, "a wall is in the line: three-quarters cover, +5 AC (if it blocks the line entirely, the attack cannot be made)"
+    blockers = [id for id, xy in m["positions"].items() if tuple(xy) in path
+                and not (_get(campaign, "entity", id) or {}).get("dead")]
+    # Cover the attacker is leaning on protects the attacker, not the target.
+    shelter = set(line[1:] if len(line) > 1 else line) & _feature_squares(m, ("cover",))
+    if shelter or blockers:
+        return 2, "half cover, +2 AC" + (" (someone is in the line)" if blockers else "")
+    return 0, ""
+
+
+def _where(m: dict, campaign: str, ref: str) -> list[int]:
+    """A square from a label like 'E6' or from the name of a token on the map."""
+    mm = re.fullmatch(r"\s*([A-Za-z]{1,2})\s*(\d{1,2})\s*", str(ref))
+    if mm:
+        col = mm.group(1).upper()
+        x = ord(col[0]) - 65 if len(col) == 1 else 26 + ord(col[1]) - 65
+        return _square(m, [x, int(mm.group(2)) - 1])
+    e = _get(campaign, "entity", _slug(str(ref)))
+    if e is None or e["id"] not in m["positions"]:
+        raise GameError(f"'{ref}' is neither a square like E6 nor someone on the map.")
+    return m["positions"][e["id"]]
+
+
+def area(campaign: str, shape: str, size_feet: int, origin: str, toward: str = "") -> dict:
+    """Who is inside an area of effect. shape: sphere (radius), cube (side), cone (length) or line
+    (length, 5 ft wide). origin: a square like 'E6' or a token's name; for a cone or line it is where the
+    effect starts. toward: for a cone or line, the square or token it is aimed at."""
+    import math
+    m = _get(campaign, "map", "map")
+    if m is None:
+        raise GameError("No battle map yet. Call set_battle_map first.")
+    shape = shape.lower().strip()
+    if shape in ("circle", "radius", "burst", "emanation"):
+        shape = "sphere"
+    if shape not in ("sphere", "cube", "cone", "line"):
+        raise GameError("shape must be sphere, cube, cone or line.")
+    o = _where(m, campaign, origin)
+    size = max(5, int(size_feet))
+    aim = None
+    if shape in ("cone", "line"):
+        if not toward:
+            raise GameError(f"A {shape} needs 'toward': the square or token it is aimed at.")
+        aim = _where(m, campaign, toward)
+        if aim == o:
+            raise GameError("origin and toward are the same square.")
+        ang = math.atan2(aim[1] - o[1], aim[0] - o[0])
+    inside = set()
+    for x in range(m["width"]):
+        for y in range(m["height"]):
+            dx, dy = (x - o[0]) * 5.0, (y - o[1]) * 5.0
+            dist = math.hypot(dx, dy)
+            if shape == "sphere":
+                ok = dist <= size + 0.01
+            elif shape == "cube":
+                half = size / 2
+                ok = abs(dx) <= half and abs(dy) <= half if size > 5 else (x, y) == tuple(o)
+            elif (x, y) == tuple(o):
+                ok = False
+            elif shape == "cone":
+                off = abs((math.atan2(dy, dx) - ang + math.pi) % (2 * math.pi) - math.pi)
+                ok = dist <= size + 2.5 and off <= math.atan(0.5) + 0.12
+            else:
+                along = dx * math.cos(ang) + dy * math.sin(ang)
+                across = abs(-dx * math.sin(ang) + dy * math.cos(ang))
+                ok = 0 < along <= size + 2.5 and across <= 3.0
+            if ok:
+                inside.add((x, y))
+    caught = []
+    for id, xy in m["positions"].items():
+        e = _get(campaign, "entity", id)
+        if e and not e.get("dead") and tuple(xy) in inside:
+            caught.append({"name": e["name"], "kind": e["kind"], "square": _label(*xy), "status": _status(e)})
+    hazards = sorted(_label(x, y) for x, y in inside & _feature_squares(m, ("hazard",)))
+    out: dict[str, Any] = {"shape": shape, "size_feet": size, "origin": _label(*o),
+                           "squares": len(inside), "inside": caught}
+    if aim:
+        out["toward"] = _label(*aim)
+    if hazards:
+        out["hazards_inside"] = hazards
+    out["instruction"] = ("Everyone listed is in the area, friends included. Resolve each with saving_throw "
+                          "and apply_damage. Walls and cover are not checked here: leave out anyone who is "
+                          "plainly sheltered from the origin.")
+    return out
+
+
+# ------------------------------------------------------------ travel map
+
+def _travel(campaign: str) -> dict:
+    return _get(campaign, "travel", "map", {"places": {}, "routes": [], "here": ""})
+
+
+def set_travel_map(campaign: str, places: list[dict] | None = None, routes: list[dict] | None = None,
+                   here: str = "") -> dict:
+    """Add to the map of places and the routes between them. places: [{name, note, known}]. routes:
+    [{from, to, hours, kind (road, trail, river, sea, gate...), danger 0-3, note, known}]. known=false hides
+    a place or route from the character until it is discovered. here: where the character is now.
+    Entries merge by name, so call it again to add or reveal things."""
+    t = _travel(campaign)
+    for p in places or []:
+        name = str(p.get("name", "")).strip()
+        if not name:
+            raise GameError("Every place needs a name.")
+        old = t["places"].get(_slug(name), {"name": name, "known": True})
+        t["places"][_slug(name)] = {**old, **{k: v for k, v in p.items() if k in ("note", "known")}, "name": old["name"]}
+    for r in routes or []:
+        a, b = _slug(str(r.get("from", ""))), _slug(str(r.get("to", "")))
+        for end in (a, b):
+            if end not in t["places"]:
+                raise GameError(f"Route end '{end}' is not a place on the map. Add the place first, in this call "
+                                "or an earlier one.")
+        if a == b or float(r.get("hours", -1)) < 0:
+            raise GameError("A route needs two different ends and hours of zero or more.")
+        new = {"a": a, "b": b, "hours": float(r["hours"]), "kind": str(r.get("kind", "road")),
+               "danger": max(0, min(3, int(r.get("danger", 0)))), "note": str(r.get("note", "")),
+               "known": bool(r.get("known", True))}
+        t["routes"] = [x for x in t["routes"] if {x["a"], x["b"]} != {a, b} or x["kind"] != new["kind"]] + [new]
+    if here:
+        if _slug(here) not in t["places"]:
+            raise GameError(f"'{here}' is not a place on the map.")
+        t["here"] = _slug(here)
+    _put(campaign, "travel", "map", t)
+    return {"places": len(t["places"]), "routes": len(t["routes"]),
+            "here": t["places"][t["here"]]["name"] if t["here"] else "not set"}
+
+
+def _routes_from(t: dict, place: str, known_only: bool = True) -> list[dict]:
+    out = []
+    for r in t["routes"]:
+        if place in (r["a"], r["b"]) and (r["known"] or not known_only):
+            other = r["b"] if r["a"] == place else r["a"]
+            if known_only and not t["places"][other].get("known", True):
+                continue
+            line = {"to": t["places"][other]["name"], "hours": r["hours"], "kind": r["kind"]}
+            if r["note"]:
+                line["note"] = r["note"]
+            out.append(line)
+    return sorted(out, key=lambda x: x["hours"])
+
+
+def _where_now(campaign: str) -> dict | None:
+    t = _travel(campaign)
+    if not t["here"]:
+        return None
+    p = t["places"][t["here"]]
+    return {"here": p["name"], "note": p.get("note", ""), "known_routes": _routes_from(t, t["here"]),
+            "use": "Move between these places with travel, which passes the time and lets the world act."}
+
+
+def travel(campaign: str, to: str, use_hidden_routes: bool = False) -> dict:
+    """Go from where the character is to another place on the travel map, by the quickest known way.
+    Time passes for each leg, clocks may advance, and the road may interrupt."""
+    t = _travel(campaign)
+    if not t["here"]:
+        raise GameError("The travel map does not say where the character is. Call set_travel_map with 'here'.")
+    goal = _slug(to)
+    if goal not in t["places"]:
+        raise GameError(f"'{to}' is not on the travel map. Known: "
+                        + ", ".join(p["name"] for p in t["places"].values() if p.get("known", True)) + ".")
+    if goal == t["here"]:
+        raise GameError("The character is already there.")
+    usable = [r for r in t["routes"] if r["known"] or use_hidden_routes]
+    best: dict[str, tuple[float, list[dict]]] = {t["here"]: (0.0, [])}
+    frontier = [t["here"]]
+    while frontier:
+        frontier.sort(key=lambda p: best[p][0])
+        cur = frontier.pop(0)
+        for r in usable:
+            if cur in (r["a"], r["b"]):
+                nxt = r["b"] if r["a"] == cur else r["a"]
+                cost = best[cur][0] + r["hours"]
+                if nxt not in best or cost < best[nxt][0]:
+                    best[nxt] = (cost, best[cur][1] + [{**r, "_to": nxt}])
+                    frontier.append(nxt)
+    if goal not in best:
+        raise GameError(f"No known way from {t['places'][t['here']]['name']} to {t['places'][goal]['name']}. "
+                        "Routes from here: " + (", ".join(f"{r['to']} ({r['hours']} h)" for r in
+                                                          _routes_from(t, t["here"])) or "none known") + ".")
+    legs, fired, ended, event = [], [], [], None
+    for r in best[goal][1]:
+        adv = advance_time(campaign, r["hours"], f"travel to {t['places'][r['_to']]['name']}")
+        fired += adv["consequences"]
+        ended += adv.get("conditions_ended", [])
+        t["here"] = r["_to"]
+        t["places"][r["_to"]]["known"] = True
+        legs.append({"to": t["places"][r["_to"]]["name"], "hours": r["hours"], "kind": r["kind"]})
+        if r["danger"] and _rng.randint(1, 6) <= r["danger"]:
+            what = surprise(campaign, _rng.choice(["complication", "activity", "omen"]))["results"][0]
+            event = {"on_the_way_to": t["places"][r["_to"]]["name"], "seed": what,
+                     "instruction": ("Something happens on this leg. Use the seed, in this place's terms. If "
+                                     "it is a fight, the character meets it tired from the road, not rested.")}
+            break
+    _put(campaign, "travel", "map", t)
+    here = t["places"][t["here"]]
+    out: dict[str, Any] = {"legs": legs, "hours": round(sum(x["hours"] for x in legs), 1), "now_at": here["name"],
+                           "arrived": t["here"] == goal, "world_hours": round(_meta(campaign)["world_hours"], 1),
+                           "consequences": fired, "instruction": _consequence_rule(fired)}
+    if here.get("note"):
+        out["place_note"] = here["note"]
+    if event:
+        out["event"] = event
+        if t["here"] != goal:
+            out["journey_interrupted"] = f"Call travel again to go on to {t['places'][goal]['name']}."
+    if ended:
+        out["conditions_ended"] = ended
+    out["onward"] = _routes_from(t, t["here"])
+    _log(campaign, "travel", " -> ".join(x["to"] for x in legs) + f" ({out['hours']} h)")
+    return out
+
+
+# ------------------------------------------------- rules shelf and monsters
+
+SRD_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "srd")
+RULES_SHELF = "rules"
+_SRD_VERSION = "srd-5.2.1-a"
+_monsters: list[dict] | None = None
+
+
+def rules_ready() -> bool:
+    """Make sure the bundled rules reference is on the rules shelf. Cheap after the first time."""
+    con, _ = _lore_db()
+    row = con.execute("SELECT data FROM book WHERE shelf=? AND slug=?", (RULES_SHELF, "~version")).fetchone()
+    con.close()
+    if row and json.loads(row[0]).get("version") == _SRD_VERSION:
+        return True
+    try:
+        with open(os.path.join(SRD_DIR, "books.json")) as f:
+            books = json.load(f)
+    except OSError:
+        return False
+    for filename, title in books.items():
+        with open(os.path.join(SRD_DIR, filename), encoding="utf-8") as f:
+            parts = _sections(f.read())
+        _store_book(RULES_SHELF, f"SRD {title}", parts, {"contents": [], "source": "SRD 5.2.1, CC BY 4.0"})
+    con, _ = _lore_db()
+    with con:
+        con.execute("INSERT OR REPLACE INTO book VALUES (?,?,?)",
+                    (RULES_SHELF, "~version", json.dumps({"version": _SRD_VERSION})))
+    con.close()
+    return True
+
+
+def rules_lookup(query: str, book: str = "", limit: int = 4) -> dict:
+    """Look up the rules as written: a spell, a condition, an action, a magic item, a class feature,
+    how something works. book narrows it: spells, glossary, playing, equipment, magic items, classes,
+    feats, monsters, toolbox."""
+    if not rules_ready():
+        raise GameError("The rules reference is not installed on this server.")
+    out = _search_shelf(RULES_SHELF, query, book, limit)
+    if out["results"]:
+        out["how_to_use"] = ("These are the rules as written (2024 rules reference). Apply them as they stand. "
+                             "You may tell the player what a rule says in a sentence or two. The table rules "
+                             "in the campaign's setting notes win where they differ.")
+    else:
+        out["note"] = ("No match in the rules reference, which covers the free core rules only. Try the "
+                       "thing's exact name. If it is not there, rule on it yourself, briefly and consistently.")
+    return out
+
+
+def _all_monsters() -> list[dict]:
+    global _monsters
+    if _monsters is None:
+        import gzip
+        try:
+            with gzip.open(os.path.join(SRD_DIR, "monsters.json.gz"), "rt", encoding="utf-8") as f:
+                _monsters = json.load(f)
+        except OSError:
+            raise GameError("The monster reference is not installed on this server.")
+    return _monsters
+
+
+def _mod(score: int) -> int:
+    return (int(score) - 10) // 2
+
+
+def monsters(query: str = "", cr_min: float = 0, cr_max: float = 30, type: str = "", limit: int = 40) -> dict:
+    """Browse the monster reference. query: part of a name. type: beast, undead, fiend and so on.
+    Returns name, challenge rating, type, hit points and armour class, weakest first."""
+    q, ty = query.lower().strip(), type.lower().strip()
+    found = [m for m in _all_monsters()
+             if (not q or q in m["name"].lower()) and (not ty or ty in m["type"].lower())
+             and float(cr_min) <= float(m["challenge_rating"]) <= float(cr_max)]
+    found.sort(key=lambda m: (float(m["challenge_rating"]), m["name"]))
+    limit = max(1, min(int(limit), 80))
+    return {"matching": len(found),
+            "monsters": [{"name": m["name"], "cr": m["challenge_rating"], "type": m["type"], "size": m["size"],
+                          "hp": m["hit_points"], "ac": m["armor_class"][0]["value"]} for m in found[:limit]],
+            "next": "Bring one into a campaign with monster_import, then rate the fight with encounter_check."}
+
+
+def _monster_sheet(m: dict) -> dict:
+    abil = {k[:3]: m[k] for k in ("strength", "dexterity", "constitution", "intelligence", "wisdom", "charisma")}
+    saves = {k: _mod(v) for k, v in abil.items()}
+    skills = {}
+    for p in m.get("proficiencies", []):
+        label = str(p.get("proficiency", ""))
+        if label.startswith("Saving Throw:"):
+            saves[label.split(":")[1].strip().lower()[:3]] = int(p["value"])
+        elif label.startswith("Skill:"):
+            skills[label.split(":")[1].strip().lower()] = int(p["value"])
+    attacks, other, per_round, routine = [], [], 1, ""
+    for a in m.get("actions", []):
+        if a["name"] == "Multiattack":
+            routine = a.get("desc", "")
+            counts = [x.get("count", 1) for x in a.get("actions", [])] \
+                + [(a.get("action_options") or {}).get("choose", 0)]
+            per_round = sum(int(c) if str(c).isdigit() else 1 for c in counts)   # 'Number of Heads' reads as 1
+            continue
+        dice = [d for d in a.get("damage", []) if d.get("damage_dice")]
+        flat = re.search(r"Hit:\s*(\d+)\s+(\w+) damage", a.get("desc", ""))
+        if "attack_bonus" in a and not dice and flat:    # tiny beasts: 'Hit: 1 Piercing damage'
+            dice = [{"damage_dice": flat.group(1), "damage_type": flat.group(2)}]
+        if "attack_bonus" in a and dice:
+            rider = a.get("desc", "")
+            cut = re.search(r"damage\.\s*(.+)$", rider, re.S)
+            extra = (cut.group(1).strip() if cut else "")
+            if len(dice) > 1:
+                extra = ("Damage includes " + ", ".join(f"{d['damage_dice']} {str(d.get('damage_type', '')).lower()}"
+                                                         for d in dice[1:]) + ". " + extra).strip()
+            reach = re.search(r"(reach \d+ ft\.|range [\d/]+ ft\.)", rider)
+            atk = {"name": a["name"], "to_hit": int(a["attack_bonus"]),
+                   "damage": "+".join(d["damage_dice"].replace(" ", "") for d in dice).replace("+-", "-"),
+                   "type": str(dice[0].get("damage_type", "")).lower()}
+            if reach:
+                atk["reach"] = reach.group(1).rstrip(".")
+            if extra:
+                atk["rider"] = extra[:400]
+            attacks.append(atk)
+        else:
+            other.append({"name": a["name"], "text": a.get("desc", "")[:600]})
+    sheet: dict[str, Any] = {
+        "max_hp": m["hit_points"], "ac": m["armor_class"][0]["value"], "init": _mod(abil["dex"]),
+        "abilities": abil, "saves": saves, "attacks": attacks, "attacks_per_round": max(1, per_round),
+        "size": m["size"].lower(), "creature_type": m["type"], "cr": m["challenge_rating"],
+        "speed": m.get("speed", {}), "senses": m.get("senses", {}), "languages": m.get("languages", ""),
+        "resist": [str(x).lower() for x in m.get("damage_resistances", [])],
+        "immune": [str(x).lower() for x in m.get("damage_immunities", [])],
+        "vulnerable": [str(x).lower() for x in m.get("damage_vulnerabilities", [])],
+        "condition_immunities": [str(x).lower() for x in m.get("condition_immunities", [])],
+        "source": f"{m['name']}, SRD 5.2.1",
+    }
+    if skills:
+        sheet["skills"] = skills
+    if routine:
+        sheet["multiattack"] = routine
+    if other:
+        sheet["other_actions"] = other
+    for key, label in (("special_abilities", "traits"), ("bonus_actions", "bonus_actions"),
+                       ("reactions", "monster_reactions"), ("legendary_actions", "legendary_actions")):
+        items = [{"name": x["name"], "text": x.get("desc", "")[:600]} for x in m.get(key, [])]
+        if items:
+            sheet[label] = items
+    return sheet
+
+
+def monster_import(campaign: str, monster: str, names: list[str] | None = None, kind: str = "creature") -> dict:
+    """Bring a monster from the rules reference into a campaign as a ready stat sheet. names: what to
+    call each copy (default: one copy under the monster's own name). kind: creature (enemy), ally or npc."""
+    pool = _all_monsters()
+    q = monster.lower().strip()
+    hit = next((m for m in pool if m["name"].lower() == q), None)
+    if hit is None:
+        close = [m["name"] for m in pool if q and q in m["name"].lower()]
+        if len(close) == 1:
+            hit = next(m for m in pool if m["name"] == close[0])
+        else:
+            raise GameError(f"No monster called '{monster}' in the rules reference."
+                            + (f" Close: {', '.join(close[:12])}." if close else " Browse with monsters."))
+    if kind not in ("creature", "ally", "npc"):
+        raise GameError("kind must be creature, ally or npc.")
+    sheet = _monster_sheet(hit)
+    saved = []
+    for name in (names or [hit["name"]]):
+        upsert_entity(campaign, name, kind, json.loads(json.dumps(sheet)))
+        saved.append(name)
+    out: dict[str, Any] = {"imported": hit["name"], "as": saved, "cr": hit["challenge_rating"],
+                           "hp": sheet["max_hp"], "ac": sheet["ac"],
+                           "attacks": [f"{a['name']} +{a['to_hit']} {a['damage']} {a['type']}" for a in attacks_of(sheet)],
+                           "attacks_per_round": sheet["attacks_per_round"]}
+    if sheet.get("other_actions"):
+        out["other_actions"] = [x["name"] for x in sheet["other_actions"]]
+        out["note"] = ("Actions that are not attack rolls (breath, spells, auras) are on the sheet as text. "
+                       "Resolve them with saving_throw, apply_damage and area.")
+    return out
+
+
+def attacks_of(sheet: dict) -> list[dict]:
+    return sheet.get("attacks", [])

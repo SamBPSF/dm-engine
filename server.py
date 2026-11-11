@@ -40,6 +40,16 @@ INSTRUCTIONS = """You are the Narrator for a solo D&D 5e game. This engine is th
   at the start of the player's turn, how conditions change their rolls. Say that before they roll.
 - Companions are yours to play. On their turn they act from their own card without being asked. At 0 hit
   points they are dying, not dead: the engine rolls their death saves and they can be saved or lost.
+- Memory: as each scene ends, record what it established with journal_note (one call, several notes):
+  names you invented, promises, debts, what people saw. Look things up with journal_search instead of
+  trusting your recollection of earlier sessions. A character's card shows what they remember.
+- When a roll fails with no obvious cost, or someone new walks in, ask the engine: surprise gives
+  complications, people, first reactions and names from this campaign's own list. Do not invent a name
+  when the list can give one.
+- Rules: when you are not sure what a spell, condition or feature does, call rules_lookup. For areas of
+  effect call area. The engine applies cover to attacks from the map.
+- Moving between mapped places uses travel, not advance_time.
+- Groups have cards too (kind "faction"). Their attitude is where their members start.
 - The player's characters live in a library, apart from any campaign. A new campaign takes a rested copy.
   To add a character, save the whole sheet with library_save. Changes made in play stay in the campaign;
   the library copy is updated only when the player says so (library_save with from_campaign).
@@ -350,6 +360,84 @@ def set_setting_notes(campaign: str, setting: str, tone: str, table_rules: list[
     """Save this campaign's setting name, tone, house rules and a description of the world. They apply
     on top of the playbook and win where the two disagree."""
     return _run(engine.set_setting_notes, campaign, setting, tone, table_rules, description)
+
+
+@mcp.tool()
+def journal_note(campaign: str, notes: list[dict]) -> dict:
+    """Record what play has established, so it is not forgotten or contradicted later. Call it as a scene
+    ends, with every note in one call. Each note: text (one plain sentence), about (names of the people,
+    places or groups concerned), kind (fact, promise, debt, threat or rumour; default fact), secret (true
+    if the player character does not know it), closes (number of an open promise, debt or threat this
+    settles). Record: names you invented, promises and debts either way, what someone saw the character
+    do, lies told, things given or taken, deaths."""
+    return _run(engine.journal_note, campaign, notes)
+
+
+@mcp.tool()
+def journal_search(campaign: str, query: str = "", about: str = "", player_view: bool = False,
+                   limit: int = 12) -> dict:
+    """Look up what play has established. about: a person, place or group. query: any words. Leave both
+    empty for the most recent entries. player_view=true returns only what the player character knows:
+    use it to answer 'what do I know about X?' or to give a recap."""
+    return _run(engine.journal_search, campaign, query, about, player_view, limit)
+
+
+@mcp.tool()
+def surprise(campaign: str, kind: str, count: int = 1, about: str = "") -> dict:
+    """Let the engine choose instead of using your first idea. kind: complication (when a roll fails or a
+    scene is too smooth), twist (for the Author and Reviewer), person (manner and want for someone new),
+    activity (what creatures are doing when found), omen, reaction (how someone first responds; about =
+    their name, so their attitude counts), name (from this campaign's own name list; about = a culture
+    or group). Use what comes up."""
+    return _run(engine.surprise, campaign, kind, count, about)
+
+
+@mcp.tool()
+def area(campaign: str, shape: str, size_feet: int, origin: str, toward: str = "") -> dict:
+    """Who is caught in an area of effect on the battle map. shape: sphere (size = radius), cube (side),
+    cone (length) or line (length). origin: a square such as 'E6', or a token's name. toward: for a cone
+    or line, the square or token it is aimed at. Friends inside are listed too."""
+    return _run(engine.area, campaign, shape, size_feet, origin, toward)
+
+
+@mcp.tool()
+def set_travel_map(campaign: str, places: list[dict] | None = None, routes: list[dict] | None = None,
+                   here: str = "") -> dict:
+    """Add places and the routes between them, or reveal ones the character has discovered. places:
+    [{name, note, known}]. routes: [{from, to, hours, kind (road, trail, river, sea, gate...), danger 0-3,
+    note, known}]. known=false keeps it hidden from the character. here: where the character is now.
+    Entries merge by name."""
+    return _run(engine.set_travel_map, campaign, places, routes, here)
+
+
+@mcp.tool()
+def travel(campaign: str, to: str, use_hidden_routes: bool = False) -> dict:
+    """Move the character to another place on the travel map by the quickest known route. Passes the
+    time for each leg (so clocks advance) and rolls for trouble on dangerous legs. Use this instead of
+    advance_time whenever the journey is between mapped places."""
+    return _run(engine.travel, campaign, to, use_hidden_routes)
+
+
+@mcp.tool()
+def rules_lookup(query: str, book: str = "", limit: int = 4) -> dict:
+    """The 2024 rules as written: what a spell, condition, action, feature or magic item does, or how a
+    rule works. Look it up when you are not certain; do not run spells or rules from recollection.
+    book narrows the search: spells, glossary, playing, equipment, magic items, classes, feats, monsters."""
+    return _run(engine.rules_lookup, query, book, limit)
+
+
+@mcp.tool()
+def monsters(query: str = "", cr_min: float = 0, cr_max: float = 30, type: str = "", limit: int = 40) -> dict:
+    """Browse the monster reference by name, challenge rating and type (beast, undead, fiend...)."""
+    return _run(engine.monsters, query, cr_min, cr_max, type, limit)
+
+
+@mcp.tool()
+def monster_import(campaign: str, monster: str, names: list[str] | None = None, kind: str = "creature") -> dict:
+    """Bring a monster from the rules reference into the campaign as a complete stat sheet the engine can
+    run: hit points, armour class, saves, attacks, multiattack, traits. names: what to call each copy,
+    for example ['Ghoul A', 'Ghoul B']. Rename or adjust afterwards with save_character."""
+    return _run(engine.monster_import, campaign, monster, names, kind)
 
 
 @mcp.tool()

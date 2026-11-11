@@ -29,6 +29,15 @@ Add a custom connector with the URL `https://<domain>/mcp` and a request header:
 
     x-api-key: <your DM_KEY>
 
+## What else is in the engine
+
+- **Journal**: facts, promises and debts established in play, so later sessions do not contradict them.
+- **Rules reference**: the free 2024 rules (SRD 5.2.1) for lookup, and its monsters as ready stat sheets.
+  See `srd/NOTICE.md` for the licence and sources.
+- **Surprise tables**: complications, twists, people, reactions and per-campaign names chosen by the engine.
+- **Battle grid**: areas of effect and cover worked out from the map.
+- **Factions and a travel map**: standing with groups, and routes whose travel time moves the villains' clocks.
+
 ## Characters
 
 Player characters are kept in a library, apart from any campaign. Each new campaign takes a rested copy.
