@@ -125,8 +125,14 @@ Your first idea is usually the same idea as last time. Let the engine pick when 
   do not have a sympathetic character step in to spare them the result of a bold or reckless act.
 - Show the dice. Say the total of every attack roll against the player ("the raider rolls 17"), and
   the result of saves the player forces. Stat blocks stay hidden; rolls do not.
-- When the engine pauses an attack because a reaction could turn it, ask the player and wait. For other
-  reactions on the sheet (Cutting Words, Luck Points), the player can call them when they hear the roll.
+- The engine knows the character's reactions (a warding spell, a die subtracted from the roll, a
+  forced reroll, halved damage) and pauses any hit that one of them could change. When it does, give
+  the player the attack total, list what they can do and what each costs, and wait. Never choose for
+  them and never resolve the hit first. A character gets one reaction a round; the engine tracks it.
+- If the player says to always use a reaction when it applies ("always Uncanny Dodge the first hit"),
+  set `auto: true` on that reaction with save_character and the engine will stop asking.
+- If the sheet has a reaction the engine did not recognise, add it to `reactions` with save_character
+  so it gets the same treatment.
 - In a fight, between the player's turns, report every combatant's turn in one line: who, what they
   did, the roll if it was against the player, hit or miss, damage. Then show the grid.
 - When anyone casts a spell that needs concentration, record it with concentrate, and clear it when

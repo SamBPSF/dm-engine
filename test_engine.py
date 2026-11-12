@@ -280,8 +280,16 @@ C9 = "react"
 g.upsert_entity(C9, "Vilik", "pc", {"max_hp": 73, "ac": 16, "reactions": [{"name": "Shield", "ac_bonus": 5}]})
 g.upsert_entity(C9, "Raider", "creature", {"max_hp": 20, "ac": 12,
                 "attacks": [{"name": "Bolt", "to_hit": 5, "damage": "1d6+2"}]})
+def new_turn(c, who):
+    e = g.get_entity(c, who)
+    e["reaction_used"] = False
+    e.pop("ac_until_turn", None)
+    g._put(c, "entity", e["id"], e)
+
+
 seen = {"pending": 0, "miss": 0, "hit": 0}
 for _ in range(300):
+    new_turn(C9, "Vilik")
     r = g.creature_attack(C9, "Raider", "Vilik", "Bolt")
     assert "rolls" in r["tell_player"]
     if r.get("pending"):
@@ -301,6 +309,7 @@ for _ in range(300):
         seen["miss"] += 1
     g.heal(C9, "Vilik", 100)
 assert seen["pending"] > 30 and seen["miss"] > 80 and seen["hit"] > 20, seen
+new_turn(C9, "Vilik")
 first = g.creature_attack(C9, "Raider", "Vilik", "Bolt")
 while not first.get("pending"):
     g.heal(C9, "Vilik", 100)
@@ -314,6 +323,109 @@ try:
     raise AssertionError("resolved an attack that was not pending")
 except g.GameError:
     pass
+
+# reactions are recognised on any sheet, by name, and each kind does its own thing
+CR = "react2"
+bard = g.upsert_entity(CR, "Sella", "pc", {
+    "max_hp": 200, "ac": 15, "proficiency_bonus": 3, "level": 6, "abilities": {"dex": 16},
+    "features": ["Cutting Words: reaction, subtract a Bardic Inspiration die", "Lucky: 3 Luck Points",
+                 {"name": "Uncanny Dodge", "text": "halve an attack's damage"}, "Shield Master: not a reaction here"],
+    "spells": {"1": ["Shield (once per long rest free)", "Shield of Faith", "Healing Word"]},
+    "resources": {"Bardic Inspiration (d8)": {"max": 2, "recharge": "short"}, "Luck Points": {"max": 1}}})
+kinds = {r["name"]: r for r in bard["reactions"]}
+assert sorted(kinds) == ["Cutting Words", "Lucky", "Shield", "Uncanny Dodge"]
+assert kinds["Cutting Words"]["die"] == "1d8" and kinds["Cutting Words"]["resource"] == "Bardic Inspiration (d8)"
+assert kinds["Lucky"]["uses_reaction"] is False and kinds["Shield"]["until_next_turn"]
+assert "reactions" not in g.upsert_entity(CR, "Plain", "pc", {"max_hp": 10, "features": ["Second Wind"]})
+g.upsert_entity(CR, "Archer", "creature", {"max_hp": 20, "ac": 12, "attacks": [
+    {"name": "Bow", "to_hit": 6, "damage": "2d6+4", "reach": "range 80/320 ft"}]})
+
+
+def until_pending(want=None):
+    for _ in range(400):
+        new_turn(CR, "Sella")
+        r = g.creature_attack(CR, "Archer", "Sella", "Bow")
+        if r.get("pending") and (want is None or want in [o["name"] for o in r["reactions_available"]]):
+            return r
+        if r.get("pending"):
+            g.resolve_attack(CR)
+        g.heal(CR, "Sella", 500)
+    raise AssertionError(f"never offered {want}")
+
+
+r = until_pending("Cutting Words")
+names = [o["name"] for o in r["reactions_available"]]
+assert "Uncanny Dodge" in names and "Lucky" in names and "damage_roll" not in r
+total = int(r["roll"].split("=")[-1])
+try:
+    g.resolve_attack(CR, "Cutting Words")                                  # needs the player's die
+    raise AssertionError("Cutting Words accepted without a roll")
+except g.GameError:
+    pass
+hp = g.get_entity(CR, "Sella")["hp"]
+done = g.resolve_attack(CR, "Cutting Words", roll=total - 15 + 1)          # exactly enough
+assert not done["hit"] and "1 left" in done["spent"] and g.get_entity(CR, "Sella")["hp"] == hp
+assert g.get_entity(CR, "Sella")["reaction_used"]
+r = g.creature_attack(CR, "Archer", "Sella", "Bow")                        # same round: the reaction is gone
+while not r["hit"]:
+    r = g.creature_attack(CR, "Archer", "Sella", "Bow")
+assert r.get("pending") and [o["name"] for o in r["reactions_available"]] == ["Lucky"]    # Lucky costs no reaction
+done = g.resolve_attack(CR, "Lucky")
+assert "lower die" in done["roll"] and "0 left" in done["spent"] and not done.get("pending")
+g.heal(CR, "Sella", 500)
+r = until_pending("Uncanny Dodge")                                         # Lucky is spent: not offered again
+assert "Lucky" not in [o["name"] for o in r["reactions_available"]]
+hp = g.get_entity(CR, "Sella")["hp"]
+done = g.creature_attack(CR, "Archer", "Sella", "RESOLVE Uncanny Dodge")
+assert done["hit"] and "halved" in done["damage_roll"]
+lost = hp - g.get_entity(CR, "Sella")["hp"]
+assert 3 <= lost <= 8, lost                                                # 2d6+4 is 6 to 16, halved
+r = until_pending("Shield")
+g.resolve_attack(CR, "Shield")
+assert g.get_entity(CR, "Sella")["ac_until_turn"] == 5
+for _ in range(60):                                                        # the ward holds for the rest of the round
+    r = g.creature_attack(CR, "Archer", "Sella", "Bow")
+    assert "warded" in r
+    if r["hit"]:
+        assert int(r["roll"].split("=")[-1]) >= 20 or "natural 20" in r["roll"].lower() or r["critical"] or r.get("pending") is None
+    g.heal(CR, "Sella", 500)
+e = g.get_entity(CR, "Sella")
+for x in e["reactions"]:
+    if x["name"] == "Uncanny Dodge":
+        x["auto"] = True                                                   # a standing order from the player
+g._put(CR, "entity", e["id"], e)
+for _ in range(200):
+    new_turn(CR, "Sella")
+    r = g.creature_attack(CR, "Archer", "Sella", "Bow")
+    if r["hit"] and not r.get("pending"):
+        assert "halved" in r["damage_roll"] and "standing_order" in r
+        break
+    if r.get("pending"):
+        g.resolve_attack(CR)
+    g.heal(CR, "Sella", 500)
+else:
+    raise AssertionError("the standing order never fired")
+g.set_condition(CR, "Sella", "stunned", True)                              # no reactions while unable to act
+new_turn(CR, "Sella")
+for _ in range(40):
+    assert not g.creature_attack(CR, "Archer", "Sella", "Bow").get("pending")
+    g.heal(CR, "Sella", 500)
+
+# sheet check: any character saved is told what is missing
+gaps = " ".join(g.sheet_check(g.get_entity(CR, "Plain")))
+assert "attacks" in gaps and "saves" in gaps and "notes" in gaps and "max_slots" not in gaps
+full = {"max_hp": 30, "ac": 14, "class": "Rogue", "level": 4, "proficiency_bonus": 2,
+        "abilities": {a: 10 for a in ("str", "dex", "con", "int", "wis", "cha")},
+        "saves": {a: 0 for a in ("str", "dex", "con", "int", "wis", "cha")}, "skills": {"stealth": 6},
+        "attacks": [{"name": "Shortsword", "to_hit": 5, "damage": "1d6+3", "type": "piercing"}],
+        "features": ["Sneak Attack 2d6", "Uncanny Dodge"],
+        "notes": "A former customs clerk who wants her name cleared, looks after a younger brother, and owes the Guild."}
+saved = g.library_save("Tess", full)
+assert "sheet_is_missing" not in saved and saved["reactions_the_engine_will_offer"] == ["Uncanny Dodge"]
+assert "spellcasting" in " ".join(g.library_save("Wiz", {"max_hp": 9, "spells": {"1": ["Shield"]}})["sheet_is_missing"])
+for gone in ("tess", "wiz"):                                               # leave the library as later checks expect
+    g._put(g.LIBRARY, "character", gone, None)
+    g._put(g.LIBRARY, "previous", gone, None)
 
 # canon: a new campaign in a saved setting sees the lore written for earlier ones
 g.create_campaign("canon-a", "Glasswater", description="Canals. Gates open by spoken word.", tone="Wet.")

@@ -232,8 +232,41 @@ def upsert_entity(campaign: str, name: str, kind: str, sheet: dict) -> dict:
     for r in e.get("resources", {}).values():
         r.setdefault("recharge", "long")
         r.setdefault("current", r.get("max", 0))
+    if kind == "pc":
+        _recognise_reactions(e)
     _put(campaign, "entity", id, e)
     return e
+
+
+def sheet_check(e: dict) -> list[str]:
+    """What a player character's sheet still lacks for the engine and the Author to do their jobs."""
+    gaps = []
+    casts = bool(e.get("spells") or e.get("cantrips"))
+    if not e.get("attacks"):
+        gaps.append("attacks: each weapon or attack cantrip as {name, to_hit, damage, type}. Without them fights cannot be rated.")
+    if len(e.get("saves", {})) < 6:
+        gaps.append("saves: the bonus for all six saving throws.")
+    if len(e.get("abilities", {})) < 6:
+        gaps.append("abilities: the six ability scores.")
+    if not e.get("skills"):
+        gaps.append("skills: the bonus for each skill.")
+    if not e.get("class") or not e.get("level"):
+        gaps.append("class and level.")
+    if not e.get("proficiency_bonus"):
+        gaps.append("proficiency_bonus.")
+    if not e.get("features"):
+        gaps.append("features: class features and feats, one line each saying what it does.")
+    if casts and not e.get("max_slots") and not any("slot" in k.lower() for k in e.get("resources", {})):
+        gaps.append("max_slots: spell slots by level, for example {\"1\": 4, \"2\": 2}.")
+    if casts and not (e.get("spellcasting") or {}).get("save_dc"):
+        gaps.append("spellcasting: {ability, save_dc, attack_bonus}.")
+    if e.get("features") and not e.get("resources") and re.search(
+            r"per (short|long)|/ ?(short|long) rest|once per|uses", " ".join(_strings(e.get("features"))).lower()):
+        gaps.append("resources: limited-use features as {name: {max, recharge: short or long}} so the engine can count them.")
+    if len(str(e.get("notes", "")) + str(e.get("backstory", ""))) < 80:
+        gaps.append("notes: a few lines on who they are. What they want, someone they care about, someone "
+                    "they owe or fear. The Author builds the adventure's hook from this; ask the player.")
+    return gaps
 
 
 def use_resource(campaign: str, who: str, name: str, amount: int = 1) -> dict:
@@ -613,34 +646,240 @@ def spend_slot(campaign: str, caster: str, level: int) -> dict:
 
 # ----------------------------------------------------------------- combat
 
-def _land(campaign: str, a: dict, t: dict, atk: dict, crit: bool, out: dict) -> dict:
+def _land(campaign: str, a: dict, t: dict, atk: dict, crit: bool, out: dict,
+          halve: bool = False, reduce: int = 0) -> dict:
     dmg = roll_expr(atk["damage"], crit=crit)
     out["damage_roll"] = dmg["detail"]
-    out.update(apply_damage(campaign, t["id"], dmg["total"], atk.get("type", ""), a["name"], crit=crit))
+    amount = dmg["total"]
+    if halve:
+        amount //= 2
+        out["damage_roll"] += f", halved to {amount}"
+    if reduce:
+        amount = max(0, amount - int(reduce))
+        out["damage_roll"] += f", reduced by {int(reduce)} to {amount}"
+    out.update(apply_damage(campaign, t["id"], amount, atk.get("type", ""), a["name"], crit=crit))
     if atk.get("rider"):
         out["rider"] = atk["rider"]
     return out
 
 
-def resolve_attack(campaign: str, use_reaction: str = "") -> dict:
-    """Finish an attack that was paused so the player could decide on a reaction."""
+# Reactions a character can use against an attack that has hit them. Recognised by name on any sheet.
+# effect: ac_bonus (turns the hit if the bonus is enough), roll_penalty (the player rolls a die that is
+# subtracted from the attack roll), disadvantage (the engine rolls again and the lower die stands),
+# halve_damage, reduce_damage (the player rolls the reduction).
+REACTION_CATALOGUE: list[tuple[str, dict]] = [
+    (r"^shield$", {"name": "Shield", "effect": "ac_bonus", "ac_bonus": 5, "until_next_turn": True,
+                   "cost": "a 1st-level spell slot (or a free casting, if the sheet has one)"}),
+    (r"^cutting words$", {"name": "Cutting Words", "effect": "roll_penalty", "die": "1d6",
+                          "resource_like": "bardic inspiration", "cost": "one Bardic Inspiration die"}),
+    (r"^lucky$", {"name": "Lucky", "effect": "disadvantage", "uses_reaction": False,
+                  "resource_like": "luck", "cost": "one Luck Point"}),
+    (r"^uncanny dodge$", {"name": "Uncanny Dodge", "effect": "halve_damage", "cost": "nothing but the reaction"}),
+    (r"^defensive duelist$", {"name": "Defensive Duelist", "effect": "ac_bonus", "ac_bonus": "proficiency",
+                              "until_next_turn": True, "melee_only": True, "cost": "nothing but the reaction"}),
+    (r"^parry$", {"name": "Parry", "effect": "ac_bonus", "ac_bonus": "proficiency", "melee_only": True,
+                  "cost": "nothing but the reaction"}),
+    (r"^deflect (attacks?|missiles?)$", {"name": "Deflect Attacks", "effect": "reduce_damage", "die": "1d10",
+                                           "cost": "nothing but the reaction"}),
+    (r"^warding flare$", {"name": "Warding Flare", "effect": "disadvantage", "resource_like": "warding flare",
+                          "cost": "one use of Warding Flare"}),
+    (r"^silvery barbs$", {"name": "Silvery Barbs", "effect": "disadvantage", "cost": "a 1st-level spell slot"}),
+]
+
+
+def _strings(x: Any) -> list[str]:
+    if isinstance(x, str):
+        return [x]
+    if isinstance(x, dict):
+        return [s for k, v in x.items() for s in ([k] if isinstance(v, (dict, str)) and not str(k).isdigit() else []) + _strings(v)]
+    if isinstance(x, (list, tuple)):
+        return [s for v in x for s in _strings(v)]
+    return []
+
+
+def _recognise_reactions(e: dict) -> list[str]:
+    """Find known reactions among a character's features, feats and spells, and put them on the sheet
+    in a form the engine can run. Anything already listed by that name is kept as the player set it."""
+    have = e.setdefault("reactions", [])
+    for r in have:                                    # the earlier, simpler form
+        if "effect" not in r and "ac_bonus" in r:
+            r["effect"] = "ac_bonus"
+    names = {r["name"].lower() for r in have}
+    labels = set()
+    for text in _strings([e.get(k) for k in ("features", "feats", "spells", "cantrips", "traits", "monster_reactions")]):
+        labels.add(re.split(r"[:(\[,–—]| - ", text, maxsplit=1)[0].strip().lower())
+    found = []
+    die = re.search(r"\bd(6|8|10|12)\b", " ".join(k for k in e.get("resources", {}) if "inspiration" in k.lower())
+                    + " " + " ".join(t for t in _strings(e.get("features")) if "inspiration" in t.lower()))
+    for pattern, template in REACTION_CATALOGUE:
+        if template["name"].lower() in names or not any(re.match(pattern, lab) for lab in labels):
+            continue
+        r = dict(template)
+        like = r.pop("resource_like", None)
+        if like:
+            key = next((k for k in e.get("resources", {}) if like in k.lower()), None)
+            if key:
+                r["resource"] = key
+        if r["name"] == "Cutting Words" and die:
+            r["die"] = f"1d{die.group(1)}"
+        if r.get("ac_bonus") == "proficiency":
+            r["ac_bonus"] = int(e.get("proficiency_bonus", 2))
+        if r["name"] == "Deflect Attacks":
+            r["die"] = f"1d10+{_mod(e.get('abilities', {}).get('dex', 10)) + int(e.get('level', 1) or 1)}"
+        have.append(r)
+        found.append(r["name"])
+    if not have:
+        e.pop("reactions")
+    return found
+
+
+def _reaction_options(t: dict, atk: dict, st: dict, skip: list[str]) -> list[dict]:
+    """Which of the target's reactions could change this hit. st: nat, total, ac, mode."""
+    if t["kind"] != "pc" or t["hp"] <= 0 or _conds(t) & _NO_ACTIONS:
+        return []
+    ranged = str(atk.get("reach", "")).startswith("range")
+    out = []
+    for r in t.get("reactions", []):
+        name, effect = r["name"], r.get("effect", "ac_bonus")
+        if name in skip or (r.get("uses_reaction", True) and t.get("reaction_used")):
+            continue
+        if r.get("melee_only") and ranged:
+            continue
+        res = t.get("resources", {}).get(r.get("resource", ""))
+        if r.get("resource") and (not res or res.get("current", 0) < 1):
+            continue
+        line = {"name": name, "cost": r.get("cost", "the reaction")}
+        if effect == "ac_bonus":
+            bonus = int(r.get("ac_bonus", 0))
+            if st["nat"] == 20 or st["total"] >= st["ac"] + bonus:
+                continue
+            line["does"] = f"+{bonus} AC: turns this hit into a miss" + (
+                ", and lasts until the start of their next turn" if r.get("until_next_turn") else "")
+        elif effect == "roll_penalty":
+            need = st["total"] - st["ac"] + 1
+            top = _die_max(r.get("die", "1d6"))
+            if st["nat"] == 20 or need > top:
+                continue
+            line["does"] = f"the player rolls {r.get('die', '1d6')} and subtracts it from the attack: {need} or more turns the hit"
+            line["needs_roll"] = r.get("die", "1d6")
+        elif effect == "disadvantage":
+            if st["mode"] == "disadvantage":
+                continue
+            line["does"] = "the attacker rolls again and the lower die stands"
+        elif effect == "halve_damage":
+            line["does"] = "the damage from this hit is halved"
+        elif effect == "reduce_damage":
+            line["does"] = f"the player rolls {r.get('die', '1d10')} and the damage is reduced by that much"
+            line["needs_roll"] = r.get("die", "1d10")
+        else:
+            continue
+        if r.get("auto"):
+            line["auto"] = True
+        out.append(line)
+    return out
+
+
+def _die_max(expr: str) -> int:
+    total = 0
+    for sign, n, sides, flat in re.findall(r"([+-]?)\s*(?:(\d*)d(\d+)|(\d+))", expr.replace(" ", "")):
+        v = int(n or 1) * int(sides) if sides else int(flat)
+        total += -v if sign == "-" else v
+    return total
+
+
+def _pause(campaign: str, a: dict, t: dict, atk: dict, st: dict, options: list[dict], out: dict) -> dict:
+    _put(campaign, "attack", "pending", {"attacker": a["id"], "target": t["id"], "atk": atk, "state": st,
+                                          "roll": out["roll"], "used": st.get("used", [])})
+    names = [o["name"] for o in options]
+    out.update({"pending": True, "hit": True, "reactions_available": options,
+                "instruction": (f"STOP before any damage. Tell the player: {a['name']} hits with a {st['total']}. "
+                                f"They may respond with {' or '.join(names)}: say what each would do and cost. "
+                                "Ask what they do. Then call resolve_attack with use_reaction set to the name "
+                                "they chose (and roll set to their die, if it needs one), or empty to take "
+                                "the hit. If you do not have resolve_attack, call creature_attack again with "
+                                "attack_name 'RESOLVE' (take the hit), 'RESOLVE Shield', or 'RESOLVE Cutting "
+                                "Words 5' (name, then their die).")})
+    return out
+
+
+def _finish(campaign: str, a: dict, t: dict, atk: dict, st: dict, out: dict,
+            halve: bool = False, reduce: int = 0) -> dict:
+    hit = st["nat"] == 20 or (st["nat"] != 1 and st["total"] >= st["ac"])
+    out.update({"hit": hit, "critical": bool(hit and st.get("crit"))})
+    if hit:
+        _land(campaign, a, t, atk, out["critical"], out, halve=halve, reduce=reduce)
+    else:
+        out["target"] = _public(_entity(campaign, t["id"]))
+    _log(campaign, "attack", f"{a['name']} {atk['name']} vs {t['name']}: {out['roll']} {'HIT' if hit else 'miss'}"
+         + (f" (after {', '.join(st.get('used', []))})" if st.get("used") else ""))
+    out["instruction"] = ("Report this result as rolled, including the total to hit when the target is the "
+                          "player. Do not soften, reroll or reinterpret it.")
+    return out
+
+
+def resolve_attack(campaign: str, use_reaction: str = "", roll: int = 0) -> dict:
+    """Finish an attack that was paused so the player could decide on a reaction. roll: the player's
+    die, for reactions that need one."""
     p = _get(campaign, "attack", "pending")
     if not p:
         raise GameError("No attack is waiting on the player.")
-    _put(campaign, "attack", "pending", None)
     a, t = _entity(campaign, p["attacker"]), _entity(campaign, p["target"])
-    out: dict[str, Any] = {"attacker": a["name"], "attack": p["atk"]["name"], "roll": p["roll"]}
-    if use_reaction:
-        out.update({"hit": False, "turned_by": use_reaction, "target": _public(t),
-                    "instruction": f"The attack misses. Spend the cost of {use_reaction} now with "
-                                   "use_resource or spend_slot."})
-        _log(campaign, "attack", f"{a['name']} {p['atk']['name']} vs {t['name']}: {p['roll']} turned by {use_reaction}")
-        return out
-    out.update({"hit": True, "critical": False})
-    _land(campaign, a, t, p["atk"], False, out)
-    _log(campaign, "attack", f"{a['name']} {p['atk']['name']} vs {t['name']}: {p['roll']} HIT")
-    out["instruction"] = "Report this result as rolled. Do not soften, reroll or reinterpret it."
-    return out
+    atk, st = p["atk"], p["state"]
+    out: dict[str, Any] = {"attacker": a["name"], "attack": atk["name"], "roll": p["roll"]}
+    if not use_reaction:
+        _put(campaign, "attack", "pending", None)
+        return _finish(campaign, a, t, atk, st, out)
+    m = re.match(r"^(.*?)[\s:]+(\d+)$", use_reaction.strip())       # 'Cutting Words 5'
+    if m and not roll:
+        use_reaction, roll = m.group(1), int(m.group(2))
+    r = next((x for x in t.get("reactions", []) if x["name"].lower() == use_reaction.strip().lower()), None)
+    offered = {o["name"]: o for o in _reaction_options(t, atk, st, st.get("used", []))}
+    if r is None or r["name"] not in offered:
+        raise GameError(f"'{use_reaction}' cannot be used on this attack. Available: "
+                        f"{', '.join(offered) or 'nothing'}. Call resolve_attack with one of those, or empty.")
+    if offered[r["name"]].get("needs_roll") and int(roll) < 1:
+        raise GameError(f"{r['name']} needs the player's roll of {offered[r['name']]['needs_roll']}. Ask for "
+                        "it, then call again with roll set.")
+    _put(campaign, "attack", "pending", None)
+    effect = r.get("effect", "ac_bonus")
+    st.setdefault("used", []).append(r["name"])
+    out["reaction"] = r["name"]
+    if r.get("uses_reaction", True):
+        t["reaction_used"] = True
+    if r.get("resource"):
+        res = t["resources"][r["resource"]]
+        res["current"] -= 1
+        out["spent"] = f"1 {r['resource']} ({res['current']} left)"
+    else:
+        out["spend"] = f"Now spend its cost: {r.get('cost', 'the reaction')}. Use spend_slot or use_resource."
+    halve, reduce = False, 0
+    if effect == "ac_bonus":
+        st["ac"] += int(r.get("ac_bonus", 0))
+        if r.get("until_next_turn"):
+            t["ac_until_turn"] = t.get("ac_until_turn", 0) + int(r.get("ac_bonus", 0))
+            out["lasts"] = f"{t['name']} keeps +{r['ac_bonus']} AC until the start of their next turn."
+    elif effect == "roll_penalty":
+        st["total"] -= int(roll)
+        out["roll"] += f", minus {int(roll)} ({r['name']}) = {st['total']}"
+    elif effect == "disadvantage":
+        second = _rng.randint(1, 20)
+        low = min(st["nat"], second)
+        st["total"] += low - st["nat"]
+        st["crit"] = st.get("crit") and low == 20
+        out["roll"] += f"; rolled again for {r['name']}: {second}. The lower die, {low}, stands: {st['total']}"
+        st["nat"], st["mode"] = low, "disadvantage"
+    elif effect == "halve_damage":
+        halve = True
+    elif effect == "reduce_damage":
+        reduce = int(roll)
+    _put(campaign, "entity", t["id"], t)
+    still_hit = st["nat"] == 20 or (st["nat"] != 1 and st["total"] >= st["ac"])
+    if still_hit and not halve and not reduce:
+        more = [o for o in _reaction_options(t, atk, st, st["used"]) if not o.get("auto")]
+        if more:
+            out["note"] = f"It still hits after {r['name']}."
+            return _pause(campaign, a, t, atk, st, more, out)
+    return _finish(campaign, a, t, atk, st, out, halve=halve, reduce=reduce)
 
 
 def creature_attack(campaign: str, attacker: str, target: str, attack_name: str = "",
@@ -648,6 +887,7 @@ def creature_attack(campaign: str, attacker: str, target: str, attack_name: str 
     """The engine rolls a non-player attack and applies the damage. The Narrator only reports it."""
     if attack_name.upper().startswith("RESOLVE"):
         return resolve_attack(campaign, attack_name[7:].strip(" :"))
+    attack_name = attack_name.strip()
     earlier = None
     if _get(campaign, "attack", "pending"):
         earlier = resolve_attack(campaign)
@@ -667,7 +907,7 @@ def creature_attack(campaign: str, attacker: str, target: str, attack_name: str 
     tired = 2 * _exhaustion(a)
     total = nat + int(atk.get("to_hit", 0)) - tired
     cover, cover_why = _cover(campaign, a, t)
-    ac = t["ac"] + cover
+    ac = t["ac"] + cover + int(t.get("ac_until_turn", 0))
     hit = nat == 20 or (nat != 1 and total >= ac)
     crit = nat == 20 or (hit and auto_crit)
     out: dict[str, Any] = {
@@ -677,6 +917,8 @@ def creature_attack(campaign: str, attacker: str, target: str, attack_name: str 
     }
     if cover:
         out["cover"] = f"{t['name']} has {cover_why}."
+    if t.get("ac_until_turn"):
+        out["warded"] = f"{t['name']} has +{t['ac_until_turn']} AC until the start of their next turn."
     if why:
         out["rolled_with"] = f"{mode if mode != 'none' else 'a straight roll (advantage and disadvantage cancel)'}: " + "; ".join(why)
     if notes:
@@ -687,26 +929,19 @@ def creature_attack(campaign: str, attacker: str, target: str, attack_name: str 
         out["earlier_attack_applied"] = earlier
     if t["kind"] == "pc":
         out["tell_player"] = f"{a['name']} rolls {total} to hit."
-    turners = [r["name"] for r in t.get("reactions", [])
-               if hit and not crit and total < ac + int(r.get("ac_bonus", 0))]
-    if turners and t["kind"] == "pc" and t["hp"] > 0:
-        _put(campaign, "attack", "pending", {"attacker": a["id"], "target": t["id"], "atk": atk,
-                                              "roll": out["roll"]})
-        out.update({"pending": True, "would_be_turned_by": turners,
-                    "instruction": (f"STOP before any damage. Tell the player: {a['name']} hits with a {total}; "
-                                    f"{' or '.join(turners)} would turn it. Ask if they use it. Then call "
-                                    "resolve_attack with use_reaction set to its name, or empty to take the hit. "
-                                    "If you do not have resolve_attack, call creature_attack again with "
-                                    "attack_name 'RESOLVE' (take the hit) or 'RESOLVE Shield' (use it).")})
-        return out
+    st = {"nat": nat, "total": total, "ac": ac, "mode": mode, "crit": crit, "used": []}
     if hit:
-        _land(campaign, a, t, atk, crit, out)
-    else:
-        out["target"] = _public(t)
-    _log(campaign, "attack", f"{a['name']} {atk['name']} vs {t['name']}: {out['roll']} {'HIT' if hit else 'miss'}")
-    out["instruction"] = ("Report this result as rolled, including the total to hit when the target is the "
-                          "player. Do not soften, reroll or reinterpret it.")
-    return out
+        options = _reaction_options(t, atk, st, [])
+        auto = next((o for o in options if o.get("auto") and not o.get("needs_roll")), None)
+        if auto:                                         # a standing order from the player
+            _put(campaign, "attack", "pending", {"attacker": a["id"], "target": t["id"], "atk": atk,
+                                                  "state": st, "roll": out["roll"], "used": []})
+            done = resolve_attack(campaign, auto["name"])
+            done["standing_order"] = f"{auto['name']} was used automatically, as the player asked."
+            return {**out, **done}
+        if options:
+            return _pause(campaign, a, t, atk, st, options, out)
+    return _finish(campaign, a, t, atk, st, out)
 
 
 def player_attack(campaign: str, attacker: str, target: str, attack_total: int,
@@ -847,6 +1082,10 @@ def next_turn(campaign: str) -> dict:
         if e["hp"] > 0 or e["kind"] == "pc" or (e["kind"] == "ally" and not e.get("stable")):
             break
     _put(campaign, "combat", "combat", s)
+    if e.get("reaction_used") or e.get("ac_until_turn"):
+        e["reaction_used"] = False
+        e.pop("ac_until_turn", None)
+        _put(campaign, "entity", e["id"], e)
     out: dict[str, Any] = {"round": s["round"], "now_acting": _public(e)}
     if ended:
         out["end_of_last_turn"] = ended
@@ -1421,7 +1660,14 @@ def library_save(name: str, sheet: dict | None = None, from_campaign: str = "") 
     if old:
         _put(LIBRARY, "previous", id, old)      # one step of undo
     _put(LIBRARY, "character", id, new)
+    _recognise_reactions(new)
+    _put(LIBRARY, "character", id, new)
     out = {"saved_to_library": _library_line(new), "fields_on_file": sorted(k for k in new if k != "library")}
+    if new.get("reactions"):
+        out["reactions_the_engine_will_offer"] = [r["name"] for r in new["reactions"]]
+    gaps = sheet_check(new)
+    if gaps:
+        out["sheet_is_missing"] = gaps
     if old and (str(old.get("level", "")), old["max_hp"]) != (str(new.get("level", "")), new["max_hp"]):
         out["changed"] = (f"Was level {old.get('level', '?')} with {old['max_hp']} hit points; now level "
                           f"{new.get('level', '?')} with {new['max_hp']}.")
@@ -1970,6 +2216,8 @@ def author_brief(campaign: str) -> dict:
         "setting_notes": _get(campaign, "setting", "notes") or "None saved yet.",
         "established_in_this_setting": _established(campaign),
         "lore_shelf": _shelf_summary(campaign) or "No books on this setting's shelf.",
+        "sheet_check": {e["name"]: sheet_check(e) for e in ents.values() if e["kind"] == "pc" and sheet_check(e)}
+                       or "The player character's sheet is complete enough.",
         "journal_open_items": _open_items(campaign, 20),
         "travel_map": _travel(campaign) if _travel(campaign)["places"] else "None yet.",
         "party": [e for e in ents.values() if e["kind"] in ("pc", "ally")],

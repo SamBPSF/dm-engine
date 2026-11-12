@@ -8,6 +8,7 @@ Environment variables:
 """
 from __future__ import annotations
 
+import hashlib
 import hmac
 import os
 import secrets
@@ -17,6 +18,7 @@ import uvicorn
 from mcp.server.mcpserver import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
 from anyio import to_thread
+from mcp.server import CacheHint
 from starlette.requests import Request
 from starlette.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
 
@@ -65,7 +67,8 @@ INSTRUCTIONS = """You are the Narrator for a solo D&D 5e game. This engine is th
   visual tool you have (inline visual, widget or artifact). Print `text_grid` only if you cannot show an image.
 - Anything that tests the player character is the player's roll: saves, checks, contests, escapes. Name
   the roll and wait for it. Tell the player the total of every attack roll made against them.
-- If creature_attack returns pending, stop and ask the player about the reaction before going on.
+- If creature_attack returns pending, stop: tell the player the roll and what each available reaction
+  would do and cost, and wait for their answer before going on. Then resolve_attack.
 - If the player asks to start a new campaign or adventure, call campaign_setup_guide and follow it. If
   you do not have that tool yet, do it by hand: pick a short new name, save the setting with
   set_setting_notes and the character with save_character, then call author_brief. Never call
@@ -79,7 +82,18 @@ INSTRUCTIONS = """You are the Narrator for a solo D&D 5e game. This engine is th
 - Clocks and sealed entries are secret. Never reveal, quote or hint that they exist.
 - If a tool returns an error, fix the call. Do not improvise the outcome instead."""
 
-mcp = MCPServer("dm-engine", instructions=INSTRUCTIONS)
+# Claude keeps a copy of a connector's tool list. Tell it, in every way the protocol offers, that the
+# copy goes stale: no caching of the list, and a version that changes whenever the code does.
+def _build_version() -> str:
+    h = hashlib.sha256()
+    for name in ("server.py", "engine.py"):
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), name), "rb") as f:
+            h.update(f.read())
+    return "1." + h.hexdigest()[:10]
+
+
+mcp = MCPServer("dm-engine", instructions=INSTRUCTIONS, version=_build_version(),
+                cache_hints={"tools/list": CacheHint(ttl_ms=0, scope="private")})
 
 
 def _run(fn, *args, **kwargs):
@@ -137,7 +151,11 @@ def save_character(campaign: str, name: str, kind: str, sheet: dict) -> dict:
     sheet fields: max_hp, ac, init (bonus), saves {str,dex,con,int,wis,cha: bonus},
     attacks [{name, to_hit, damage like '1d8+3', type, rider, count}], attacks_per_round,
     resist/immune/vulnerable [types],
-    reactions [{name, ac_bonus}] (player reactions that can turn a hit, such as Shield +5),
+    reactions: for a player character the engine recognises the common ones by name from features,
+    feats and spells (Shield, Cutting Words, Lucky, Uncanny Dodge, Defensive Duelist, Deflect Attacks,
+    Parry, Warding Flare, Silvery Barbs) and pauses attacks so the player can use them. Add others as
+    [{name, effect: ac_bonus|roll_penalty|disadvantage|halve_damage|reduce_damage, ac_bonus or die,
+    resource (name of a resource it spends), cost, uses_reaction, auto (true = use without asking)}],
     max_slots {'1': 4, ...}, resources {name: {max, recharge: 'short'|'long'}}, notes. A player
     character can also carry abilities, skills, spells, features, inventory, money and level: any
     field is stored. Fields merge over what is already stored."""
@@ -145,8 +163,15 @@ def save_character(campaign: str, name: str, kind: str, sheet: dict) -> dict:
     if "error" in e:
         return e
     # A short receipt, not the whole sheet: get_character returns the full thing when it is needed.
-    return {"saved": e["name"], "kind": e["kind"], "hp": e["hp"], "max_hp": e["max_hp"], "ac": e["ac"],
-            "fields_on_file": sorted(k for k in e if k not in ("id", "name", "kind"))}
+    out = {"saved": e["name"], "kind": e["kind"], "hp": e["hp"], "max_hp": e["max_hp"], "ac": e["ac"],
+           "fields_on_file": sorted(k for k in e if k not in ("id", "name", "kind"))}
+    if e["kind"] == "pc":
+        if e.get("reactions"):
+            out["reactions_the_engine_will_offer"] = [r["name"] for r in e["reactions"]]
+        gaps = engine.sheet_check(e)
+        if gaps:
+            out["sheet_is_missing"] = gaps
+    return out
 
 
 @mcp.tool()
@@ -201,10 +226,12 @@ def creature_attack(campaign: str, attacker: str, target: str, attack_name: str 
 
 
 @mcp.tool()
-def resolve_attack(campaign: str, use_reaction: str = "") -> dict:
+def resolve_attack(campaign: str, use_reaction: str = "", roll: int = 0) -> dict:
     """Finish an attack that creature_attack paused for the player's decision. use_reaction: the name of
-    the reaction they chose (for example 'Shield'), or empty to take the hit."""
-    return _run(engine.resolve_attack, campaign, use_reaction)
+    the reaction they chose, or empty to take the hit. roll: the player's die, for reactions that need
+    one (Cutting Words, Deflect Attacks). If the attack still hits and another reaction could apply,
+    it pauses again."""
+    return _run(engine.resolve_attack, campaign, use_reaction, roll)
 
 
 @mcp.tool()
