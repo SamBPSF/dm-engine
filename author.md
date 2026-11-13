@@ -89,7 +89,7 @@ other way:
    start. Give each cast member who belongs to one a `faction` field naming it.
 
    **Names.** Seal an entry called `names`: forty or more names that fit this setting, one per line,
-   each prefixed with its culture or group and a colon (for example `Marsh folk: Ysolt Renn`). Mix
+   each prefixed with its culture or group and a colon, in the form `<culture or group>: <name>`. Mix
    given names, full names and a few place names. The Narrator draws from this list in play instead of
    inventing, so none of them may be a name you have already used.
 

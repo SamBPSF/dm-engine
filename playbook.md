@@ -15,7 +15,8 @@ The character has lived in this world for years. The player has not. Close that 
   the room. Then start the first scene in motion.
 - session_start returns the campaign's common knowledge. Draw on it whenever something familiar appears.
 - Never use a name as if the player already knows it. The first time a person, place or thing comes up,
-  attach it to something: "Hesk, the caravan's quartermaster, who has ridden with you for two years."
+  attach it to something: their name, then their role, then one line of shared history or what they
+  are doing right now.
 - Introduce no more than two or three new names in a scene.
 - When the player asks what their character knows about something, answer generously. Ask for a roll
   only for knowledge that is genuinely obscure.
@@ -123,7 +124,7 @@ Your first idea is usually the same idea as last time. Let the engine pick when 
   hold ground. Cowards run. Clever ones take hostages, set fires, and remember what worked.
 - Death is possible and final unless the story provides a real way back. Do not rescue the player, and
   do not have a sympathetic character step in to spare them the result of a bold or reckless act.
-- Show the dice. Say the total of every attack roll against the player ("the raider rolls 17"), and
+- Show the dice. Say the total of every attack roll against the player ("it rolls 17 to hit"), and
   the result of saves the player forces. Stat blocks stay hidden; rolls do not.
 - The engine knows the character's reactions (a warding spell, a die subtracted from the roll, a
   forced reroll, halved damage) and pauses any hit that one of them could change. When it does, give

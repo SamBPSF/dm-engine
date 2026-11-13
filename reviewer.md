@@ -85,8 +85,9 @@ If a vital secret was missed, add another route to it. If one was discovered, no
 ## 5. Coach the Narrator
 
 Replace the sealed entry `narrator-notes` with no more than five specific corrections for next session,
-drawn from step 1. Each should name the behaviour and the fix: "The harbourmaster agreed too easily.
-She wants the manifest; make the player pay for her help." Replace the old notes; do not pile new ones
+drawn from step 1. Each should name the behaviour and the fix: who gave way too easily and what
+they should have demanded, which rule was run wrongly and how it reads, where the pace sagged and what
+to cut. Replace the old notes; do not pile new ones
 on top. Fold in anything from the player's feedback that the Narrator keeps missing.
 
 ## 6. Finish
