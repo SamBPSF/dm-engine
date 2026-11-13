@@ -651,6 +651,9 @@ tmp = pathlib.Path(os.environ["DATA_DIR"])
 (tmp / "Van_Richtens_Guide.md").write_text("# Darklords\nEach domain is the prison of its darklord, who cannot leave.")
 rec = g.lore_add_file("ravenloft", "Van_Richtens_Guide.md", str(tmp / "Van_Richtens_Guide.md"))
 assert rec["title"] == "Van Richtens Guide" and rec["contents"] == ["Darklords"]
+listing = g.lore_shelf("ravenloft")
+assert "contents" not in str(listing["books"]) and "more" in listing            # the list stays short
+assert g.lore_shelf("ravenloft", "van richtens")["book"]["contents"] == ["Darklords"]
 with zipfile.ZipFile(tmp / "gaz.docx", "w") as z:
     z.writestr("word/document.xml", "<w:document><w:p><w:r><w:t>Krezk has an abbey of Saint Markovia.</w:t></w:r></w:p></w:document>")
 g.lore_add_file("ravenloft", "gaz.docx", str(tmp / "gaz.docx"))

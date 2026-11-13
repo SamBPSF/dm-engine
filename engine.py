@@ -2228,17 +2228,27 @@ def _books(shelf: str) -> list[dict]:
     return [json.loads(r[0]) for r in rows]
 
 
-def lore_shelf(name: str) -> dict:
-    """What is on the shelf for a campaign's setting (or a named setting)."""
+def lore_shelf(name: str, book: str = "") -> dict:
+    """What is on the shelf for a campaign's setting (or a named setting). The list is kept short; name a
+    book to get its table of contents."""
     shelf = _shelf_for(name)
     books = _books(shelf)
+    if book:
+        hit = next((b for b in books if _slug(book) in _slug(b["title"])), None)
+        if hit is None:
+            raise GameError(f"No book like '{book}' on the '{shelf}' shelf.")
+        return {"shelf": shelf, "book": {k: hit[k] for k in (
+            "title", "pages", "passages", "added", "pages_read_by_text_recognition", "contents", "warning",
+            "note") if hit.get(k)}}
     con, _ = _lore_db()
     others = sorted({r[0] for r in con.execute("SELECT DISTINCT shelf FROM book")} - {shelf})
     con.close()
     out: dict[str, Any] = {"shelf": shelf, "books": [
-        {k: b[k] for k in ("title", "pages", "passages", "added", "pages_read_by_text_recognition",
-                           "contents", "warning") if b.get(k)}
+        {k: b[k] for k in ("title", "pages", "passages", "pages_read_by_text_recognition", "warning")
+         if b.get(k)}
         for b in books], "can_read_scans": ocr_available()}
+    if books:
+        out["more"] = "Call lore_shelf with a book's title for its table of contents."
     busy = [j for j in book_jobs(shelf) if j["status"] in ("queued", "reading")]
     failed = [j for j in book_jobs(shelf) if j["status"] == "failed"]
     if busy:
@@ -2278,7 +2288,9 @@ def lore_search(name: str, query: str, book: str = "", limit: int = 5) -> dict:
         out["how_to_use"] = ("Reference for you, not text for the player. Say what the character would know or "
                              "can find out, in your own words; never paste or closely paraphrase a passage. "
                              "Books hold secrets the character has not earned: keep those back. Setting notes "
-                             "win over the books where they differ.")
+                             "win over the books where they differ. If a book was written for another edition "
+                             "of the game, take its story, people and places but not its numbers: build "
+                             "creatures from the rules reference (monster_import) or fresh at this game's scale.")
     else:
         out["note"] = ("Nothing on the shelf matches. Try a name or a different word. If the books do not "
                        "cover it, decide it yourself in keeping with what they do say.")

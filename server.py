@@ -502,9 +502,10 @@ def lore_search(campaign: str, query: str, book: str = "", limit: int = 5) -> di
 
 
 @mcp.tool()
-def lore_shelf(campaign: str) -> dict:
-    """List the books and notes on a campaign's setting shelf, with their contents where known."""
-    return _run(engine.lore_shelf, campaign)
+def lore_shelf(campaign: str, book: str = "") -> dict:
+    """List the books and notes on a campaign's setting shelf (campaign may also be a setting name), with
+    any uploads still being read. Pass book (part of a title) to get that book's table of contents."""
+    return _run(engine.lore_shelf, campaign, book)
 
 
 @mcp.tool()
