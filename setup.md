@@ -13,25 +13,13 @@ possible. The lists returned with this guide show the settings, characters and t
      assume short.
    If there is exactly one saved character and they did not mention another, assume that character.
 
-2. **Name the campaign yourself.** A short lowercase name: the setting, plus a number if that name is
-   taken (the list of existing campaigns is below). Tell the player the name; it is how they will come
-   back to this game.
-
-3. **Call create_campaign.** Pass the setting name. Pass a description and tone only for a new or
-   invented setting; a saved setting is copied automatically. Pass the character name to copy that
-   character from the library, fully rested. Leave table_rules empty to reuse the player's saved rules.
-
-   **If the player has books or long notes for the setting** and create_campaign reports none on the
-   shelf, call lore_upload_link with the setting name, give them the link, and wait until they say the
-   books are in. Check with lore_shelf. Then carry on. Do not ask them to paste a book into the chat.
-
-4. **New character only:** save the full sheet to the library with library_save, then save the same
-   sheet into the new campaign with save_character, kind `pc`, before going on. Copy everything on the
-   sheet, in these shapes:
+2. **New character only:** save the full sheet to the library with library_save before anything else.
+   Copy everything on the sheet, in these shapes:
    - `max_hp`, `ac`, `init` (bonus), `speed`, `level`, `class`, `species`, `background`, `proficiency_bonus`
    - `abilities` {str, dex, con, int, wis, cha: score}, `saves` {the same six: bonus}, `skills` {name: bonus}
-   - `attacks` [{name, to_hit, damage such as "1d8+3", type, count if it is made more than once, rider}]:
-     every weapon and every attack cantrip
+   - `attacks` [{name, to_hit, damage such as "1d8+3", type, count if it is made more than once, rider,
+     once_per_turn for extra dice added to one hit a turn, such as "2d6" for Sneak Attack}]: every
+     weapon and every attack cantrip
    - `spellcasting` {ability, save_dc, attack_bonus}, `max_slots` {"1": 4, "2": 2}, `spells` {"1": [names]},
      `cantrips` [names]
    - `resources` {name: {max, recharge: "short" or "long"}} for anything with limited uses
@@ -41,6 +29,18 @@ possible. The lists returned with this guide show the settings, characters and t
    If something is missing that the sheet does not show, ask the player once, in one message. If their
    notes are thin, ask for three things: what the character wants, someone they care about, and someone
    they owe or fear. The Author builds the hook from those.
+
+3. **Name the campaign yourself.** A short lowercase name: the setting, plus a number if that name is
+   taken (the list of existing campaigns is below). Tell the player the name; it is how they will come
+   back to this game.
+
+4. **Call create_campaign.** Pass the setting name. Pass a description and tone only for a new or
+   invented setting; a saved setting is copied automatically. Pass the character name to copy that
+   character from the library, fully rested: this works for a character you saved a moment ago too. Leave table_rules empty to reuse the player's saved rules.
+
+   **If the player has books or long notes for the setting** and create_campaign reports none on the
+   shelf, call lore_upload_link with the setting name, give them the link, and wait until they say the
+   books are in. Check with lore_shelf. Then carry on. Do not ask them to paste a book into the chat.
 
 5. **Run the Author.** Call author_brief for the new campaign and follow its procedure. That work is
    sealed: reveal none of it.

@@ -427,6 +427,45 @@ for gone in ("tess", "wiz"):                                               # lea
     g._put(g.LIBRARY, "character", gone, None)
     g._put(g.LIBRARY, "previous", gone, None)
 
+# things the rehearsal found
+RH = "rehearse"
+rogue = {"max_hp": 31, "ac": 15, "level": 4, "features": ["Sneak Attack: 2d6 extra damage once per turn", "Uncanny Dodge"],
+         "attacks": [{"name": "Shortsword", "to_hit": 6, "damage": "1d6+4", "type": "piercing"}]}
+g.library_save("Rhea", rogue)
+plain = g.upsert_entity(RH, "Plainblade", "pc", {**rogue, "features": []})
+copied = g.upsert_entity(RH, "Rhea", "pc", {"from_library": True})          # no second copy of the sheet needed
+assert copied["attacks"][0]["name"] == "Shortsword" and copied["hp"] == 31 and "library" not in copied
+assert g._dpr(copied, 12) > g._dpr(plain, 12) + 4                            # Sneak Attack counts in fight ratings
+assert not any("resources" in x for x in g.sheet_check(copied))             # 'once per turn' is not a limited use
+try:
+    g.upsert_entity(RH, "Nobody", "pc", {"from_library": True})
+    raise AssertionError("copied a character who is not in the library")
+except g.GameError:
+    pass
+g.monster_import(RH, "Ghoul")
+sc = g.start_combat(RH, ["Rhea", "Ghoul"], {"Rhea": 1})                      # the ghoul goes first and is briefed
+assert sc["first_turn"]["routine"].startswith("The ghoul makes two Bite") and "set_battle_map" in sc["next"]
+sc = g.start_combat(RH, ["Rhea", "Ghoul"], {"Rhea": 40})
+assert sc["first_turn"]["now_acting"]["kind"] == "pc" and "map" not in sc["first_turn"]
+g.set_battle_map(RH, 8, 6, [{"name": "gap in the jetty", "kind": "hazard", "x": 3, "y": 1, "w": 1, "h": 1},
+                             {"name": "grain sacks", "kind": "cover", "x": 5, "y": 2, "w": 1, "h": 2}],
+                 {"Rhea": [1, 1], "Ghoul": [2, 1]})
+svg = g.battle_map(RH)["map"]["svg"]
+assert ">grain<" in svg and ">sacks<" in svg and ">jetty<" in svg            # labels wrap on whole words
+assert svg.rstrip("</svg>").rsplit("<text", 1)[1].count("1 square = 5 ft") == 1   # and the legend is still the legend
+assert g._wrap_label("gap in the jetty", 7, 3) == ["gap in", "the", "jetty"] and g._wrap_label("portcullis", 6, 1) == ["portc…"]
+for _ in range(60):
+    r = g.creature_attack(RH, "Ghoul", "Rhea", "Bite")
+    if r.get("pending"):
+        done = g.resolve_attack(RH, "Uncanny Dodge")
+        assert "spend" not in done and "halved" in done["damage_roll"]
+        break
+    g.heal(RH, "Rhea", 100)
+else:
+    raise AssertionError("no hit to dodge")
+g.end_combat(RH)
+g._put(g.LIBRARY, "character", "rhea", None)
+
 # canon: a new campaign in a saved setting sees the lore written for earlier ones
 g.create_campaign("canon-a", "Glasswater", description="Canals. Gates open by spoken word.", tone="Wet.")
 g.seal("canon-a", "lore-the-metal", "The metal is called sunbrass.")

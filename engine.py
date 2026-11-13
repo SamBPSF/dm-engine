@@ -214,6 +214,12 @@ def upsert_entity(campaign: str, name: str, kind: str, sheet: dict) -> dict:
         raise GameError("kind must be pc, ally, npc or creature.")
     id = _slug(name)
     e = _get(campaign, "entity", id, {})
+    sheet = dict(sheet)
+    if sheet.pop("from_library", False):               # a rested copy of the library character
+        master = _get(LIBRARY, "character", id)
+        if master is None:
+            raise GameError(f"No character called '{name}' in the library. Save the sheet with library_save first.")
+        e = _fresh(master)
     e.update(sheet)
     e.update({"id": id, "name": e.get("name", name), "kind": kind})
     if "max_hp" not in e:
@@ -261,7 +267,8 @@ def sheet_check(e: dict) -> list[str]:
     if casts and not (e.get("spellcasting") or {}).get("save_dc"):
         gaps.append("spellcasting: {ability, save_dc, attack_bonus}.")
     if e.get("features") and not e.get("resources") and re.search(
-            r"per (short|long)|/ ?(short|long) rest|once per|uses", " ".join(_strings(e.get("features"))).lower()):
+            r"per (short|long) rest|/ ?(short|long) rest|per day|times per|once per (short|long)",
+            " ".join(_strings(e.get("features"))).lower()):
         gaps.append("resources: limited-use features as {name: {max, recharge: short or long}} so the engine can count them.")
     if len(str(e.get("notes", "")) + str(e.get("backstory", ""))) < 80:
         gaps.append("notes: a few lines on who they are. What they want, someone they care about, someone "
@@ -850,7 +857,7 @@ def resolve_attack(campaign: str, use_reaction: str = "", roll: int = 0) -> dict
         res = t["resources"][r["resource"]]
         res["current"] -= 1
         out["spent"] = f"1 {r['resource']} ({res['current']} left)"
-    else:
+    elif not str(r.get("cost", "")).startswith("nothing"):
         out["spend"] = f"Now spend its cost: {r.get('cost', 'the reaction')}. Use spend_slot or use_resource."
     halve, reduce = False, 0
     if effect == "ac_bonus":
@@ -1063,7 +1070,16 @@ def start_combat(campaign: str, combatants: list[str], player_initiatives: dict[
     state = {"active": True, "round": 1, "turn": 0, "order": order}
     _put(campaign, "combat", "combat", state)
     _log(campaign, "combat", "Combat begins: " + ", ".join(f"{o['name']} {o['init']}" for o in order))
-    return {"round": 1, "order": [{"name": o["name"], "init": o["init"]} for o in order], "now_acting": order[0]["name"]}
+    out = {"round": 1, "order": [{"name": o["name"], "init": o["init"]} for o in order],
+           "now_acting": order[0]["name"]}
+    first = _turn_block(campaign, _entity(campaign, order[0]["id"]), state, {})
+    first.pop("map", None)                             # the map for this fight is not laid out yet
+    first.pop("draw_grid", None)
+    out["first_turn"] = first
+    out["next"] = ("Call set_battle_map now to lay out the fight; it returns the grid. Then run the first "
+                   "turn as first_turn says" + (": show the grid and ask the player what they do."
+                                                  if first.get("now_acting", {}).get("kind") == "pc" else "."))
+    return out
 
 
 def next_turn(campaign: str) -> dict:
@@ -1089,13 +1105,20 @@ def next_turn(campaign: str) -> dict:
     out: dict[str, Any] = {"round": s["round"], "now_acting": _public(e)}
     if ended:
         out["end_of_last_turn"] = ended
+    return _turn_block(campaign, e, s, out)
+
+
+def _turn_block(campaign: str, e: dict, s: dict, out: dict) -> dict:
+    """What the Narrator needs to run this combatant's turn."""
+    out.setdefault("now_acting", _public(e))
     if e["conditions"]:
         out["conditions_now"] = [_condition_line(e, c) for c in e["conditions"]]
     cannot = sorted(_conds(e) & _NO_ACTIONS)
-    if e["kind"] == "pc":
+    if e["kind"] == "pc" and _get(campaign, "map", "map"):
         out.update(battle_map(campaign))
         out["draw_grid"] = ("It is the player's turn. First report every turn taken since their last one, a "
                             "line each. Then show the battle grid as map.how_to_show says. Then ask what they do.")
+    if e["kind"] == "pc":
         notes = _turn_notes(campaign, e, s)
         if notes:
             out["tell_player_before_they_roll"] = notes
@@ -1244,6 +1267,20 @@ def _text_grid(w: int, h: int, feats: list[dict], tokens: list[dict]) -> str:
     return "\n".join([head] + [f"{y + 1:>3} " + "".join(row) for y, row in enumerate(cells)])
 
 
+def _wrap_label(name: str, width: int, rows: int) -> list[str]:
+    """Fit a feature's name into its box: whole words on up to `rows` lines, an ellipsis if it runs over."""
+    lines: list[str] = []
+    words = name.split()
+    while words and len(lines) < rows:
+        line = words.pop(0)
+        while words and len(line) + 1 + len(words[0]) <= width:
+            line += " " + words.pop(0)
+        lines.append(line if len(line) <= width else line[: width - 1] + "…")
+    if words and lines:
+        lines[-1] = lines[-1][: width - 1].rstrip() + "…"
+    return lines
+
+
 def _svg_grid(w: int, h: int, feats: list[dict], tokens: list[dict], legend: list[str]) -> str:
     c = max(18, min(44, 600 // w))
     left, top = (680 - w * c) // 2 + 8, 30
@@ -1263,10 +1300,11 @@ def _svg_grid(w: int, h: int, feats: list[dict], tokens: list[dict], legend: lis
         fx, fy = left + f["x"] * c, top + f["y"] * c
         dash = ' stroke-dasharray="5 3"' if f.get("kind") == "hazard" else ""
         o.append(f'<rect x="{fx}" y="{fy}" width="{fw}" height="{fh}" rx="3" fill="{fill}" stroke="{stroke}"{dash}/>')
-        name = str(f.get("name", ""))[: max(0, fw // 7)]
-        if name and fh >= 16:
-            o.append(f'<text x="{fx + fw / 2}" y="{fy + fh / 2}" font-size="12" fill="{ink}" text-anchor="middle" '
-                     f'dominant-baseline="central">{_xml(name)}</text>')
+        label = _wrap_label(str(f.get("name", "")), max(3, fw // 6), max(1, min(3, fh // 13)))
+        for i, text in enumerate(label):
+            ty = fy + fh / 2 + (i - (len(label) - 1) / 2) * 12
+            o.append(f'<text x="{fx + fw / 2}" y="{ty}" font-size="11" fill="{ink}" text-anchor="middle" '
+                     f'dominant-baseline="central">{_xml(text)}</text>')
     for x in range(w + 1):
         o.append(f'<line x1="{left + x * c}" y1="{top}" x2="{left + x * c}" y2="{top + h * c}" stroke="#888780" stroke-width="0.5"/>')
     for y in range(h + 1):
@@ -1355,7 +1393,25 @@ def _dpr(e: dict, ac: float) -> float:
             best = max(best, (p * _avg(a["damage"]) + 0.05 * _avg(a["damage"], True)) * int(a.get("count", 1)))
         except (KeyError, ValueError, TypeError):
             continue
-    return best * int(e.get("attacks_per_round", 1))
+    swings = int(e.get("attacks_per_round", 1))
+    total = best * swings
+    extra = _once_per_turn(e)
+    if extra and best > 0:
+        a = max(e["attacks"], key=lambda x: int(x.get("to_hit", 0)))
+        p = min(0.95, max(0.05, (21 - (ac - int(a.get("to_hit", 0)))) / 20))
+        tries = swings * int(a.get("count", 1))
+        total += (1 - (1 - p) ** tries) * _avg(extra)
+    return total
+
+
+def _once_per_turn(e: dict) -> str:
+    """Extra dice a character adds to one hit a turn (Sneak Attack and the like). Taken from an attack's
+    once_per_turn field, or read from the features."""
+    for a in e.get("attacks", []):
+        if a.get("once_per_turn"):
+            return str(a["once_per_turn"])
+    m = re.search(r"sneak attack\D{0,24}?(\d+d\d+)", " ".join(_strings([e.get("features"), e.get("attacks")])).lower())
+    return m.group(1) if m else ""
 
 
 def encounter_check(campaign: str, enemies: list[str], allies: list[str] | None = None, pc: str = "") -> dict:
@@ -2350,9 +2406,9 @@ def create_campaign(campaign: str, setting: str, description: str = "", tone: st
         src = _saved_characters().get(_slug(character))
         if src is None:
             out["character"] = (f"No character called '{character}' in the library. Ask the player for the "
-                                "sheet, save it with library_save, then copy it into this campaign by "
-                                f"calling save_character('{name}', ...) with the same sheet, before running "
-                                "the Author.")
+                                "sheet and save it with library_save. Then bring it into this campaign with "
+                                f"save_character: campaign '{name}', kind pc, sheet {{\"from_library\": true}}. "
+                                "Do both before running the Author.")
         else:
             e = _fresh(src)
             _put(name, "entity", e["id"], e)
@@ -2361,8 +2417,9 @@ def create_campaign(campaign: str, setting: str, description: str = "", tone: st
                     "updated": time.strftime("%Y-%m-%d", time.gmtime()), "from_campaign": src["_from"]}})
             out["character"] = f"{e['name']} copied from {src['_from']}, fully rested."
     else:
-        out["character"] = ("None yet. Save the player character with library_save, and into this campaign "
-                            "with save_character, before running the Author.")
+        out["character"] = ("None yet. Save the player character's sheet with library_save, then bring it "
+                            f"into this campaign with save_character: campaign '{name}', kind pc, sheet "
+                            "{\"from_library\": true}. Do both before running the Author.")
     shelf = _shelf_summary(name)
     out["lore_shelf"] = shelf["books"] if shelf else (
         "No books on this setting's shelf. If the player has said they own books or notes for it, call "
