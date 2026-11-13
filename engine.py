@@ -12,6 +12,7 @@ import os
 import re
 import secrets
 import sqlite3
+import threading
 import time
 from typing import Any
 
@@ -1978,8 +1979,71 @@ def _outline(reader: Any) -> list[str]:
     return titles
 
 
-def lore_add_file(shelf: str, filename: str, path: str) -> dict:
-    """Read an uploaded book (PDF, EPUB, Word, text, markdown or HTML) and put it on the shelf."""
+def ocr_available() -> bool:
+    """Whether this server can read scanned pages: it needs the tesseract program and two libraries."""
+    import shutil
+    if not shutil.which("tesseract"):
+        return False
+    try:
+        import pypdfium2  # noqa: F401
+        import pytesseract  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def _ocr_pages(path: str, numbers: list[int], progress: Any = None) -> dict[int, str]:
+    """Recognise the text on the given pages (1-based) of a PDF. Pages are drawn one at a time and read
+    by a few tesseract processes side by side."""
+    import concurrent.futures as cf
+    import pypdfium2 as pdfium
+    import pytesseract
+    os.environ.setdefault("OMP_THREAD_LIMIT", "1")       # one core per page; the pool supplies the rest
+    workers = max(1, min(4, os.cpu_count() or 1))
+    out: dict[int, str] = {}
+
+    def read(img: Any) -> str:
+        try:
+            return pytesseract.image_to_string(img, lang="eng", config="--psm 3", timeout=180)
+        except Exception:
+            return ""
+
+    pdf = pdfium.PdfDocument(path)
+    try:
+        with cf.ThreadPoolExecutor(max_workers=workers) as pool:
+            waiting: dict[Any, int] = {}
+            done = 0
+            for n in numbers:
+                try:
+                    page = pdf[n - 1]
+                    width = page.get_width()             # points; aim for about 1,800 pixels across
+                    scale = max(1.5, min(3.2, 1800 / max(width, 1)))
+                    img = page.render(scale=scale, grayscale=True).to_pil()
+                except Exception:
+                    out[n] = ""
+                    continue
+                waiting[pool.submit(read, img)] = n
+                if len(waiting) >= workers * 2:          # do not hold many page images in memory
+                    finished, _ = cf.wait(waiting, return_when=cf.FIRST_COMPLETED)
+                    for f in finished:
+                        out[waiting.pop(f)] = f.result()
+                        done += 1
+                    if progress:
+                        progress(done, len(numbers))
+            for f in cf.as_completed(list(waiting)):
+                out[waiting[f]] = f.result()
+                done += 1
+                if progress:
+                    progress(done, len(numbers))
+    finally:
+        pdf.close()
+    return out
+
+
+def lore_add_file(shelf: str, filename: str, path: str, progress: Any = None) -> dict:
+    """Read an uploaded book (PDF, EPUB, Word, text, markdown or HTML) and put it on the shelf. Pages of
+    a PDF that are only pictures of text are read by text recognition. progress(done, total) is called
+    as scanned pages are read."""
     import zipfile
     stem, ext = os.path.splitext(os.path.basename(filename))
     title = re.sub(r"[_\s]+", " ", stem).strip() or "Untitled"
@@ -1997,20 +2061,37 @@ def lore_add_file(shelf: str, filename: str, path: str) -> dict:
             pages = len(reader.pages)
         except Exception as ex:
             raise GameError(f"Could not open '{filename}' as a PDF: {ex}")
-        parts, empty = [], 0
+        texts: dict[int, str] = {}
         for i, page in enumerate(reader.pages, 1):
             try:
-                text = page.extract_text() or ""
+                texts[i] = page.extract_text() or ""
             except Exception:
-                text = ""
-            if len(text.strip()) < 40:
-                empty += 1
-            else:
-                parts.append((f"p. {i}", text))
+                texts[i] = ""
+        blank = [i for i, t in texts.items() if len(t.strip()) < 40]
+        recognised = 0
+        if blank and ocr_available():
+            for i, t in _ocr_pages(path, blank, progress).items():
+                if len(t.strip()) >= 40:
+                    texts[i] = t
+                    recognised += 1
+        parts = [(f"p. {i}", texts[i]) for i in sorted(texts) if len(texts[i].strip()) >= 40]
+        empty = pages - len(parts)
         extra.update({"pages": pages, "pages_without_text": empty, "contents": _outline(reader)})
-        if empty > pages / 2:
-            extra["warning"] = ("Most pages have no text layer, so this looks like a scan. It needs text "
-                                "recognition (OCR) before it can be searched properly.")
+        if recognised:
+            extra["pages_read_by_text_recognition"] = recognised
+            extra["note"] = ("Read from a scan. Expect some misread words, and do not trust numbers taken "
+                             "from tables or stat blocks.")
+        if blank and not ocr_available():
+            if not parts:
+                raise GameError(f"'{filename}' is a scan with no text layer, and this server cannot read "
+                                "scans yet.")
+            extra["warning"] = (f"{len(blank)} of {pages} pages are scans with no text layer and were "
+                                "skipped: this server cannot read scans yet.")
+        elif not parts:
+            raise GameError(f"No readable text found in '{filename}', even with text recognition. The scan "
+                            "may be too faint or not in English.")
+        elif empty > pages / 2:
+            extra["warning"] = (f"Only {len(parts)} of {pages} pages gave readable text. The scan may be poor.")
     elif ext in (".txt", ".md", ".markdown"):
         with open(path, encoding="utf-8", errors="replace") as f:
             parts = _sections(f.read())
@@ -2044,6 +2125,101 @@ def lore_add_file(shelf: str, filename: str, path: str) -> dict:
     return _store_book(shelf, title, parts, extra)
 
 
+# Books are read in the background, one at a time, so a long scan does not hold a web request open.
+_jobs: dict[str, dict] = {}
+_job_queue: Any = None
+_job_lock = threading.Lock()
+
+
+def _job_public(j: dict) -> dict:
+    return {k: j[k] for k in ("id", "filename", "status", "detail", "result") if j.get(k) is not None}
+
+
+def _save_job(j: dict) -> None:
+    side = j["path"] + ".job.json"
+    if j["status"] in ("done", "failed"):
+        for f in (side, j["path"]):
+            if os.path.exists(f):
+                os.remove(f)
+        return
+    with open(side, "w") as f:
+        json.dump({k: j[k] for k in ("id", "shelf", "token", "filename", "path", "created")}, f)
+
+
+def _job_worker() -> None:
+    while True:
+        j = _job_queue.get()
+        j["status"], j["detail"] = "reading", "Reading the book."
+        last = [0.0]
+
+        def progress(done: int, total: int, j: dict = j) -> None:
+            if time.time() - last[0] > 1 or done == total:
+                last[0] = time.time()
+                j["detail"] = f"Recognising text on scanned pages: {done} of {total}."
+
+        try:
+            rec = lore_add_file(j["shelf"], j["filename"], j["path"], progress)
+            j["result"] = {k: rec[k] for k in ("title", "passages", "pages", "pages_read_by_text_recognition",
+                                               "warning", "note") if rec.get(k)}
+            j["status"], j["detail"] = "done", ""
+        except GameError as ex:
+            j["status"], j["detail"] = "failed", str(ex)
+        except Exception as ex:                          # a bad file must not stop the queue
+            j["status"], j["detail"] = "failed", f"Could not read that file: {ex}"
+        try:
+            _save_job(j)
+        except OSError:
+            pass
+
+
+def submit_book(shelf: str, filename: str, path: str, token: str = "", job_id: str = "") -> dict:
+    """Queue an uploaded file to be read onto a shelf. Returns at once; book_jobs reports progress."""
+    global _job_queue
+    with _job_lock:
+        if _job_queue is None:
+            import queue
+            _job_queue = queue.Queue()
+            threading.Thread(target=_job_worker, daemon=True, name="book-reader").start()
+        for old in [k for k, v in _jobs.items() if v["status"] in ("done", "failed")
+                    and time.time() - v["created"] > 86400]:
+            _jobs.pop(old)
+        j = {"id": job_id or secrets.token_hex(6), "shelf": shelf, "token": token, "filename": filename,
+             "path": path, "status": "queued", "detail": "Waiting its turn.", "result": None,
+             "created": time.time()}
+        _jobs[j["id"]] = j
+    _save_job(j)
+    _job_queue.put(j)
+    return _job_public(j)
+
+
+def book_jobs(shelf: str = "", token: str = "") -> list[dict]:
+    found = [j for j in _jobs.values() if (not shelf or j["shelf"] == shelf) and (not token or j["token"] == token)]
+    return [_job_public(j) for j in sorted(found, key=lambda j: j["created"])]
+
+
+def resume_jobs() -> int:
+    """After a restart, pick up any upload that was still waiting or being read."""
+    n = 0
+    if not os.path.isdir(UPLOAD_DIR):
+        return 0
+    for name in sorted(os.listdir(UPLOAD_DIR)):
+        full = os.path.join(UPLOAD_DIR, name)
+        if name.endswith(".job.json"):
+            try:
+                with open(full) as f:
+                    j = json.load(f)
+                if os.path.exists(j["path"]) and j["id"] not in _jobs:
+                    submit_book(j["shelf"], j["filename"], j["path"], j.get("token", ""), j["id"])
+                    n += 1
+                elif not os.path.exists(j["path"]):
+                    os.remove(full)
+            except (OSError, ValueError, KeyError):
+                continue
+        elif not os.path.exists(full + ".job.json") and time.time() - os.path.getmtime(full) > 3600:
+            os.remove(full)                              # an upload that never finished arriving
+    return n
+
+
 def _books(shelf: str) -> list[dict]:
     con, _ = _lore_db()
     rows = con.execute("SELECT data FROM book WHERE shelf=? AND slug NOT LIKE '~%' ORDER BY slug",
@@ -2060,8 +2236,15 @@ def lore_shelf(name: str) -> dict:
     others = sorted({r[0] for r in con.execute("SELECT DISTINCT shelf FROM book")} - {shelf})
     con.close()
     out: dict[str, Any] = {"shelf": shelf, "books": [
-        {k: b[k] for k in ("title", "pages", "passages", "added", "contents", "warning") if b.get(k)}
-        for b in books]}
+        {k: b[k] for k in ("title", "pages", "passages", "added", "pages_read_by_text_recognition",
+                           "contents", "warning") if b.get(k)}
+        for b in books], "can_read_scans": ocr_available()}
+    busy = [j for j in book_jobs(shelf) if j["status"] in ("queued", "reading")]
+    failed = [j for j in book_jobs(shelf) if j["status"] == "failed"]
+    if busy:
+        out["still_being_read"] = busy
+    if failed:
+        out["failed_uploads"] = failed
     if not books:
         out["note"] = ("Nothing on this shelf. If the player has books or notes for the setting, call "
                        "lore_upload_link and give them the link, or paste short notes with lore_add.")
@@ -2165,7 +2348,7 @@ def lore_upload_link(setting: str) -> dict:
     token = secrets.token_urlsafe(24)
     con, _ = _lore_db()
     with con:
-        con.execute("DELETE FROM ticket WHERE expires < ?", (time.time(),))
+        con.execute("DELETE FROM ticket WHERE expires < ?", (time.time() - 86400,))
         con.execute("INSERT INTO ticket VALUES (?,?,?)", (token, shelf, time.time() + 3600))
     con.close()
     base = os.environ.get("PUBLIC_URL", "").rstrip("/")
@@ -2177,10 +2360,12 @@ def lore_upload_link(setting: str) -> dict:
                             "hour, so it is for them only. When they say it is done, call lore_shelf to check.")}
 
 
-def upload_ticket(token: str) -> str | None:
-    """The shelf an upload link is good for, or None if the link is unknown or has expired."""
+def upload_ticket(token: str, grace: float = 0) -> str | None:
+    """The shelf an upload link is good for, or None if the link is unknown or has expired. grace: extra
+    seconds after expiry during which the link still shows progress but takes no new books."""
     con, _ = _lore_db()
-    row = con.execute("SELECT shelf FROM ticket WHERE token=? AND expires>?", (token, time.time())).fetchone()
+    row = con.execute("SELECT shelf FROM ticket WHERE token=? AND expires>?",
+                      (token, time.time() - grace)).fetchone()
     con.close()
     return row[0] if row else None
 

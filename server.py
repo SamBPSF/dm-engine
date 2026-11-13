@@ -17,7 +17,6 @@ from urllib.parse import unquote
 import uvicorn
 from mcp.server.mcpserver import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
-from anyio import to_thread
 from mcp.server import CacheHint
 from starlette.requests import Request
 from starlette.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
@@ -597,34 +596,48 @@ UPLOAD_PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.5 system-ui,sans-serif}
 main{max-width:640px;margin:0 auto;padding:32px 16px}h1{font-size:24px;margin:0 0 4px}p{color:var(--mute);margin:0 0 16px}
 #drop{border:2px dashed var(--line);border-radius:12px;background:var(--card);padding:40px 16px;text-align:center;cursor:pointer}
-#drop.over{border-color:var(--accent)}#drop b{color:var(--accent)}
-ul{list-style:none;padding:0;margin:20px 0 0}li{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin:0 0 8px}
-li small{display:block;color:var(--mute)}li.ok small{color:var(--ok)}li.bad small{color:var(--bad)}
+#drop.over{border-color:var(--accent)}#drop b{color:var(--accent)}#drop[hidden]{display:none}
+ul{list-style:none;padding:0;margin:20px 0 0}li{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin:0 0 8px;overflow-wrap:anywhere}
+li small{display:block;color:var(--mute)}li.ok small{color:var(--ok)}li.bad small{color:var(--bad)}li small.plain{color:var(--mute)}
 h2{font-size:15px;margin:28px 0 8px;color:var(--mute);font-weight:600}
 </style></head><body><main>
 <h1>Add books to the __SHELF__ shelf</h1>
-<p>PDF, EPUB, Word, text or markdown. Each book is read into a private search index on your game server so the
-DM can look things up. A book with the same file name replaces the earlier copy. This page stops working an
-hour after the link was made.</p>
+<p id="intro">PDF, EPUB, Word, text or markdown. Each book is read into a private search index on your game
+server so the DM can look things up. Scanned books are read by text recognition, which takes a few minutes
+each. A book with the same file name replaces the earlier copy. You can close this page once the files
+have been sent; reading carries on without it.</p>
 <div id="drop" tabindex="0"><b>Choose files</b> or drop them here</div>
 <input id="pick" type="file" multiple hidden accept=".pdf,.epub,.docx,.txt,.md,.markdown,.html,.htm">
 <ul id="list"></ul>
 <h2>Already on the shelf</h2><ul id="have">__HAVE__</ul>
 </main><script>
-const drop=document.getElementById('drop'),pick=document.getElementById('pick'),list=document.getElementById('list');
-let queue=Promise.resolve();
+const OPEN=__OPEN__,drop=document.getElementById('drop'),pick=document.getElementById('pick'),list=document.getElementById('list');
+const rows={};let queue=Promise.resolve(),timer=null;
+if(!OPEN){drop.hidden=true;document.getElementById('intro').textContent='This link no longer takes new books. Books already sent are still being read; their progress is below. Ask the DM chat for a new link to add more.';}
 function row(name){const li=document.createElement('li');const t=document.createElement('span');t.textContent=name;
-const s=document.createElement('small');s.textContent='Waiting';li.append(t,s);list.append(li);return {li,s};}
-function send(file){const r=row(file.name);queue=queue.then(async()=>{r.s.textContent='Uploading and reading. A long book can take a few minutes.';
+const s=document.createElement('small');s.textContent='Waiting to send';const n=document.createElement('small');n.className='plain';
+li.append(t,s,n);list.append(li);return {li,s,n,done:false};}
+function show(r,j){r.n.textContent='';
+if(j.status==='failed'){r.li.className='bad';r.s.textContent=j.detail||'Could not be read.';r.done=true;return;}
+if(j.status==='done'){const x=j.result||{};r.li.className=x.warning?'bad':'ok';
+r.s.textContent='Added: '+x.passages+' passages'+(x.pages?' from '+x.pages+' pages':'')+(x.pages_read_by_text_recognition?' ('+x.pages_read_by_text_recognition+' read by text recognition)':'')+(x.warning?'. '+x.warning:'');
+if(x.note)r.n.textContent=x.note;r.done=true;return;}
+r.li.className='';r.s.textContent=j.detail||'Waiting its turn.';}
+async function poll(){try{const res=await fetch(location.pathname.replace(/[/]$/,'')+'/jobs',{cache:'no-store'});if(!res.ok)return;
+const d=await res.json();for(const j of d.jobs){if(!rows[j.id])rows[j.id]=row(j.filename);show(rows[j.id],j);}
+if(d.jobs.every(j=>j.status==='done'||j.status==='failed')&&timer){clearInterval(timer);timer=null;}}catch(e){}}
+function watch(){if(!timer)timer=setInterval(poll,2500);}
+function send(file){const r=row(file.name);queue=queue.then(async()=>{r.s.textContent='Sending';
 try{const res=await fetch(location.href,{method:'POST',headers:{'x-filename':encodeURIComponent(file.name)},body:file});
 const j=await res.json();if(!res.ok||j.error){r.li.className='bad';r.s.textContent=j.error||('Failed ('+res.status+')');return;}
-r.li.className=j.warning?'bad':'ok';r.s.textContent='Added: '+j.passages+' passages'+(j.pages?' from '+j.pages+' pages':'')+(j.warning?'. '+j.warning:'');
-}catch(e){r.li.className='bad';r.s.textContent='Upload failed: '+e.message;}});}
+rows[j.id]=r;show(r,j);watch();
+}catch(e){r.li.className='bad';r.s.textContent='Sending failed: '+e.message;}});}
 function take(files){for(const f of files)send(f);}
 drop.onclick=()=>pick.click();drop.onkeydown=e=>{if(e.key==='Enter'||e.key===' ')pick.click();};
 pick.onchange=()=>{take(pick.files);pick.value='';};
 drop.ondragover=e=>{e.preventDefault();drop.classList.add('over');};drop.ondragleave=()=>drop.classList.remove('over');
 drop.ondrop=e=>{e.preventDefault();drop.classList.remove('over');take(e.dataTransfer.files);};
+poll().then(()=>{if(Object.values(rows).some(r=>!r.done))watch();});
 </script></body></html>"""
 
 
@@ -633,26 +646,40 @@ def _esc(text: str) -> str:
 
 
 async def _upload(scope, receive, send):
-    """The book-upload page behind a one-hour link made by lore_upload_link. The link is the permission."""
-    token = scope["path"].split("/")[2] if scope["path"].count("/") >= 2 else ""
+    """The book-upload page behind a one-hour link made by lore_upload_link. The link is the permission.
+    Files are saved and read in the background; the page asks /jobs how each one is getting on."""
+    parts = scope["path"].strip("/").split("/")
+    token = parts[1] if len(parts) > 1 else ""
     shelf = engine.upload_ticket(token)
-    if not shelf:
+    lapsed = None if shelf else engine.upload_ticket(token, grace=86400)   # progress stays visible for a day
+    quiet = {"Cache-Control": "no-store", "Referrer-Policy": "no-referrer", "X-Robots-Tag": "noindex"}
+    if not shelf and not lapsed:
         return await PlainTextResponse("This upload link has expired. Ask the DM chat for a new one.",
                                        status_code=404)(scope, receive, send)
+    if parts[2:] == ["jobs"]:
+        return await JSONResponse({"jobs": engine.book_jobs(token=token)}, headers=quiet)(scope, receive, send)
     if scope["method"] == "GET":
         have = "".join(f"<li>{_esc(b['title'])}<small>{b['passages']} passages</small></li>"
-                       for b in engine.lore_shelf(shelf)["books"]) or "<li><small>Nothing yet</small></li>"
-        page = UPLOAD_PAGE.replace("__SHELF__", _esc(shelf)).replace("__HAVE__", have)
-        return await HTMLResponse(page, headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer",
-                                                 "X-Robots-Tag": "noindex"})(scope, receive, send)
+                       for b in engine.lore_shelf(shelf or lapsed)["books"]) or "<li><small>Nothing yet</small></li>"
+        page = (UPLOAD_PAGE.replace("__SHELF__", _esc(shelf or lapsed)).replace("__HAVE__", have)
+                .replace("__OPEN__", "true" if shelf else "false"))
+        return await HTMLResponse(page, headers=quiet)(scope, receive, send)
     if scope["method"] != "POST":
         return await JSONResponse({"error": "Use the page to upload."}, status_code=405)(scope, receive, send)
+    if not shelf:
+        return await JSONResponse({"error": "This link no longer takes new books. Ask the DM chat for a new one."},
+                                  status_code=403)(scope, receive, send)
     request = Request(scope, receive)
     filename = os.path.basename(unquote(request.headers.get("x-filename", "")).replace("\\", "/"))[:200] or "book.txt"
+    ext = os.path.splitext(filename)[1].lower()
+    if ext not in (".pdf", ".epub", ".docx", ".txt", ".md", ".markdown", ".html", ".htm"):
+        return await JSONResponse({"error": f"'{ext or filename}' is not a kind of file the shelf can read. Use "
+                                            "PDF, EPUB, Word (.docx), text, markdown or HTML."},
+                                  status_code=400)(scope, receive, send)
     os.makedirs(engine.UPLOAD_DIR, exist_ok=True)
-    path = os.path.join(engine.UPLOAD_DIR, secrets.token_hex(8) + os.path.splitext(filename)[1].lower()[:10])
+    path = os.path.join(engine.UPLOAD_DIR, secrets.token_hex(8) + ext)
+    size, kept = 0, False
     try:
-        size = 0
         with open(path, "wb") as f:
             async for chunk in request.stream():
                 size += len(chunk)
@@ -662,16 +689,11 @@ async def _upload(scope, receive, send):
                 f.write(chunk)
         if size == 0:
             return await JSONResponse({"error": "The file arrived empty."}, status_code=400)(scope, receive, send)
-        try:
-            rec = await to_thread.run_sync(engine.lore_add_file, shelf, filename, path)
-        except engine.GameError as e:
-            return await JSONResponse({"error": str(e)}, status_code=400)(scope, receive, send)
-        except Exception as e:  # a bad file must not take the server down
-            return await JSONResponse({"error": f"Could not read that file: {e}"}, status_code=400)(scope, receive, send)
-        return await JSONResponse({k: rec[k] for k in ("title", "passages", "pages", "warning") if rec.get(k)}
-                                  )(scope, receive, send)
+        job = engine.submit_book(shelf, filename, path, token)
+        kept = True
+        return await JSONResponse(job, headers=quiet)(scope, receive, send)
     finally:
-        if os.path.exists(path):
+        if not kept and os.path.exists(path):
             os.remove(path)
 
 
@@ -707,6 +729,12 @@ class KeyGate:
 application = KeyGate(app)
 
 if __name__ == "__main__":
+    try:
+        resumed = engine.resume_jobs()                   # uploads that a restart interrupted
+        if resumed:
+            print(f"Resumed reading {resumed} uploaded book(s).")
+    except Exception as ex:
+        print(f"Could not resume uploads: {ex}")
     if not DM_KEY:
         raise SystemExit("Set the DM_KEY environment variable before starting the server.")
     uvicorn.run(application, host="0.0.0.0", port=int(os.environ.get("PORT", "8080")))

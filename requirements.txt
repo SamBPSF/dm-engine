@@ -1,3 +1,6 @@
 mcp>=2.3,<3
 uvicorn>=0.30
 pypdf>=4
+pypdfium2>=4
+pytesseract>=0.3.10
+Pillow>=10

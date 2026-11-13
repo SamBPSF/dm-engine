@@ -1,5 +1,6 @@
 """Quick checks that the rules behave. Run with: python test_engine.py"""
 import os
+import time
 import tempfile
 
 os.environ["DATA_DIR"] = tempfile.mkdtemp()
@@ -666,6 +667,43 @@ try:
         pass
 except ImportError:
     pass
+# books are read in a background queue; a scanned page is read by text recognition where the server can
+(tmp / "queued.md").write_text("# Harbour\nThe harbour chain is raised at dusk.")
+job = g.submit_book("ravenloft", "Queued Notes.md", str(tmp / "queued.md"), token="tkn")
+for _ in range(100):
+    state = g.book_jobs(token="tkn")[0]
+    if state["status"] in ("done", "failed"):
+        break
+    time.sleep(0.05)
+assert state["status"] == "done" and state["result"]["title"] == "Queued Notes" and not (tmp / "queued.md").exists()
+assert g.lore_search("ravenloft", "harbour chain")["results"][0]["book"] == "Queued Notes"
+bad = g.submit_book("ravenloft", "nope.pdf", str(tmp / "missing.pdf"), token="tkn2")
+for _ in range(100):
+    state = g.book_jobs(token="tkn2")[0]
+    if state["status"] in ("done", "failed"):
+        break
+    time.sleep(0.05)
+assert state["status"] == "failed" and any(j["id"] == bad["id"] for j in g.lore_shelf("ravenloft")["failed_uploads"])
+g.lore_remove("Ravenloft", "Queued Notes")
+g._jobs.clear()
+try:
+    from reportlab.pdfgen import canvas as _canvas
+    from PIL import Image, ImageDraw, ImageFont
+    can_test_scan = g.ocr_available()
+except ImportError:
+    can_test_scan = False
+if can_test_scan:
+    img = Image.new("L", (1700, 500), 255)
+    font = ImageFont.load_default(size=44)
+    ImageDraw.Draw(img).text((60, 60), "The lighthouse keeper of Graben Island\nhas not been seen since the thaw.", font=font, fill=0)
+    img.save(tmp / "scan.png")
+    c = _canvas.Canvas(str(tmp / "Island Notes.pdf"), pagesize=(612, 180))
+    c.drawImage(str(tmp / "scan.png"), 0, 0, width=612, height=180)
+    c.save()
+    rec = g.lore_add_file("ravenloft", "Island Notes.pdf", str(tmp / "Island Notes.pdf"))
+    assert rec["pages_read_by_text_recognition"] == 1 and "scan" in rec["note"]
+    assert "lighthouse" in g.lore_search("ravenloft", "Graben Island keeper")["results"][0]["text"].lower()
+    g.lore_remove("Ravenloft", "Island Notes")
 assert len(g.lore_shelf(CC)["books"]) == 3
 g.lore_remove("Ravenloft", "gaz")
 assert len(g.lore_shelf(CC)["books"]) == 2 and g.lore_search(CC, "abbey")["results"] == []

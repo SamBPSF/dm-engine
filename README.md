@@ -46,8 +46,9 @@ What happens in play stays in that campaign; the library copy changes only when 
 ## Adding setting books
 
 In a chat, ask the DM for a link to add books to a setting. It makes a private page, good for one hour,
-where PDF, EPUB, Word and text files can be dropped in. The files are read into the search index and
-not kept. `https://<domain>/backup` (with the key) downloads a copy of every saved game.
+where PDF, EPUB, Word and text files can be dropped in. Scanned books are read by text recognition
+(tesseract, installed by the Dockerfile), a few minutes per book, in the background. The files are read
+into the search index and not kept. `https://<domain>/backup` (with the key) downloads a copy of every saved game.
 
 ## Run locally
 

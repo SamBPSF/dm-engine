@@ -1,0 +1,14 @@
+# The game server, with the tesseract program so scanned books can be read on upload.
+FROM python:3.12-slim
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-eng \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY . .
+
+ENV PYTHONUNBUFFERED=1
+CMD ["python", "server.py"]
