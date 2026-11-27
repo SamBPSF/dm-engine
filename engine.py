@@ -2528,7 +2528,8 @@ def _established(campaign: str) -> list[dict]:
     out, size = [], 0
     for c in _campaign_names():
         n = _get(c, "setting", "notes") or {}
-        if c == campaign or n.get("canon_version", 0) < 2 or _slug(n.get("setting", "")) != _slug(mine["setting"]):
+        # Notes saved before versions existed and edited since carry canon_version None, not a number.
+        if c == campaign or (n.get("canon_version") or 0) < 2 or _slug(n.get("setting", "")) != _slug(mine["setting"]):
             continue
         for v in _all(c, "sealed").values():
             if v["key"].startswith("lore-") and size < 12000:

@@ -477,6 +477,14 @@ assert [e["subject"] for e in est] == ["the-metal"] and "sunbrass" in est[0]["te
 assert g.author_brief("canon-b")["setting_notes"]["description"].startswith("Canals")
 assert "binding" in g.author_brief("canon-b")["procedure"]
 assert g.author_brief(C7)["established_in_this_setting"] == []
+# notes saved before canon versions existed, then edited, carry no version: the brief still works,
+# and that campaign's lore is not offered as canon
+g._put("canon-old", "setting", "notes", {"setting": "Glasswater", "tone": "Wet.", "saved_at": 1})
+g.set_setting_notes("canon-old", "Glasswater", "Wetter.")
+g.seal("canon-old", "lore-the-old-name", "An older name for the metal.")
+est = g.author_brief("canon-b")["established_in_this_setting"]
+assert [e["subject"] for e in est] == ["the-metal"]
+g.archive_campaign("canon-old")
 
 # encounter check: weak enemies rate low, heavy ones high, and a crowd is flagged
 CE = "enc"
